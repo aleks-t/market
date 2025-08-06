@@ -31,7 +31,7 @@ st.set_page_config(
 st.markdown("""
     <style>
     .stApp {
-        max-width: 1200px;
+        # max-width: 1200px;
         margin: 0 auto;
     }
     .stButton>button {
