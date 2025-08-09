@@ -886,17 +886,30 @@ def display_experiment_result(result, experiment):
                     st.metric(
                         "Best Time Period",
                         best_period,
-                        f"{best_stats['avg_return']:.2f}% avg"
+                        f"{best_stats['avg_return']:.2f}% avg",
+                        help="🏆 The holding period (7d, 30d, etc.) that produced the highest average returns. This is your optimal exit timing for this pattern."
                     )
                 with col2:
-                    st.metric("Total Signals", best_stats['valid_signals'])
+                    st.metric(
+                        "Total Signals", 
+                        best_stats['valid_signals'],
+                        help="📊 Number of times this pattern triggered during analysis. More signals = more statistical confidence, but need 20+ for reliability."
+                    )
                 with col3:
-                    st.metric("Win Rate", f"{best_stats['win_rate']:.1f}%")
+                    st.metric(
+                        "Win Rate", 
+                        f"{best_stats['win_rate']:.1f}%",
+                        help="🎯 Percentage of trades that were profitable. 60-80% is excellent. Above 95% is usually too good to be true."
+                    )
                 with col4:
                     # Calculate annualized return estimate
                     period_days = len(pd.date_range(experiment['start_date'], experiment['end_date']))
                     annual_return = (best_stats['avg_return'] * best_stats['valid_signals'] * 365) / period_days
-                    st.metric("Annualized Return", f"{annual_return:.1f}%")
+                    st.metric(
+                        "Annualized Return", 
+                        f"{annual_return:.1f}%",
+                        help="📈 Expected yearly return if you followed this strategy consistently. Compare to S&P 500 (~10% annually). Above 20% is very good."
+                    )
 
                 # Risk metrics
                 st.subheader("📊 Risk Metrics")
@@ -904,15 +917,27 @@ def display_experiment_result(result, experiment):
 
                 with col1:
                     sharpe_approx = (best_stats['avg_return'] / best_stats['std_dev']) if best_stats['std_dev'] > 0 else 0
-                    st.metric("Sharpe Ratio (approx)", f"{sharpe_approx:.2f}")
+                    st.metric(
+                        "Sharpe Ratio (approx)", 
+                        f"{sharpe_approx:.2f}",
+                        help="Risk-adjusted return measure. >0.5 is decent, >1.0 is great, >2.0 is excellent. Higher = better returns for the risk taken."
+                    )
 
                 with col2:
                     max_loss = abs(best_stats['worst_signal'])
-                    st.metric("Max Single Loss", f"{max_loss:.2f}%")
+                    st.metric(
+                        "Max Single Loss", 
+                        f"{max_loss:.2f}%",
+                        help="The worst single trade result - your maximum possible loss on any one trade. This is your worst-case scenario."
+                    )
 
                 with col3:
                     profit_factor = abs(best_stats['best_signal'] / best_stats['worst_signal']) if best_stats['worst_signal'] != 0 else float('inf')
-                    st.metric("Best/Worst Ratio", f"{profit_factor:.2f}")
+                    st.metric(
+                        "Best/Worst Ratio", 
+                        f"{profit_factor:.2f}",
+                        help="Best trade ÷ Worst trade. Shows if your wins are bigger than your losses. >2.0 means wins are twice as big as losses."
+                    )
 
             # AI Analysis
             if experiment.get('enable_ai', True):
