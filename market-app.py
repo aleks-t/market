@@ -16,7 +16,7 @@ if not os.getenv('ANTHROPIC_API_KEY'):
 
 # Page config with improved styling
 st.set_page_config(
-    page_title="Market Scout - Fixed",
+    page_title="Market Scout",
     page_icon="🔍",
     layout="wide",
     initial_sidebar_state="expanded",
@@ -485,13 +485,8 @@ if 'scout' not in st.session_state:
 
 def main():
     """Main application"""
-    # Header
-    st.title("🔍 Market Scout - Complete Fixed Version")
-    st.subheader(
-        "All bugs fixed: Different metrics + Working AI + Complete functionality")
-
-    # Add explanation of fixes
-    st.info("🔧 **FIXES**: 1) Different time periods now show different results 2) Working API key for AI analysis 3) All original functionality preserved")
+    # Header - Clean and simple
+    st.title("🔍 Market Scout")
 
     # Sidebar
     with st.sidebar:
