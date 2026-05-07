@@ -963,7 +963,7 @@ def display_experiment_result(result, experiment):
             st.warning("No forward return data available for visualization")
 
 def run_monte_carlo_simulation(result, experiment):
-    """Simulate future price paths from current price using historical return statistics"""
+    """Simulate future price paths — unconditional vs conditioned on trigger signal"""
     st.subheader("🎲 Monte Carlo: Future Price Projection")
 
     forward_analysis = result.get('forward_analysis', {})
@@ -971,7 +971,7 @@ def run_monte_carlo_simulation(result, experiment):
         st.info("No forward analysis data available for Monte Carlo simulation.")
         return
 
-    # Pick the best-performing period to anchor simulation stats
+    # Pick the best-performing period to anchor conditional simulation stats
     best_period_key = None
     best_avg = -999
     for period, stats in forward_analysis.items():
@@ -985,16 +985,16 @@ def run_monte_carlo_simulation(result, experiment):
 
     col1, col2, col3 = st.columns(3)
     with col1:
-        sim_days = st.number_input(
-            "Days to Simulate",
-            min_value=7, max_value=365, value=90,
-            key=f"mc_days_{result['experiment']}"
-        )
-    with col2:
         n_sims = st.number_input(
             "Number of Simulations",
             min_value=500, max_value=20000, value=5000,
             key=f"mc_sims_{result['experiment']}"
+        )
+    with col2:
+        sim_days = st.number_input(
+            "Days to Simulate",
+            min_value=7, max_value=365, value=90,
+            key=f"mc_days_{result['experiment']}"
         )
     with col3:
         nu = st.number_input(
@@ -1017,94 +1017,182 @@ def run_monte_carlo_simulation(result, experiment):
         return
 
     close_prices = target_data['Close'].values
-    daily_log_returns = np.diff(np.log(close_prices.astype(float)))
-    daily_mean = np.mean(daily_log_returns)
-    daily_vol = np.std(daily_log_returns)
     current_price = float(close_prices[-1])
+    n_sims_int = int(n_sims)
+    sim_days_int = int(sim_days)
 
-    shocks = daily_mean + daily_vol * np.random.standard_t(df=nu, size=(int(n_sims), int(sim_days)))
-    log_paths = np.hstack([np.zeros((int(n_sims), 1)), np.cumsum(shocks, axis=1)])
-    price_paths = current_price * np.exp(log_paths)
+    # --- Unconditional simulation: GDX's own daily return history ---
+    daily_log_returns = np.diff(np.log(close_prices.astype(float)))
+    unc_daily_mean = np.mean(daily_log_returns)
+    unc_daily_vol  = np.std(daily_log_returns)
 
-    days = np.arange(int(sim_days) + 1)
-    pct_5  = np.percentile(price_paths, 5,  axis=0)
-    pct_25 = np.percentile(price_paths, 25, axis=0)
-    pct_50 = np.percentile(price_paths, 50, axis=0)
-    pct_75 = np.percentile(price_paths, 75, axis=0)
-    pct_95 = np.percentile(price_paths, 95, axis=0)
+    unc_shocks    = unc_daily_mean + unc_daily_vol * np.random.standard_t(df=nu, size=(n_sims_int, sim_days_int))
+    unc_log_paths = np.hstack([np.zeros((n_sims_int, 1)), np.cumsum(unc_shocks, axis=1)])
+    unc_paths     = current_price * np.exp(unc_log_paths)
 
+    # --- Conditional simulation: calibrated to signal-triggered returns ---
+    # Extract the forward returns that occurred specifically after the trigger fired
+    signal_details = result.get('signal_details', [])
+    cond_raw = [s[best_period_key] / 100 for s in signal_details
+                if best_period_key in s and s[best_period_key] is not None]
+
+    has_conditional = len(cond_raw) >= 5
+    cond_paths = None
+
+    if has_conditional:
+        period_days = int(best_period_key.replace('d', ''))
+        # Convert n-period % returns → log returns → daily equivalents
+        log_cond = np.log(1 + np.array(cond_raw))
+        cond_daily_mean = np.mean(log_cond) / period_days
+        cond_daily_vol  = np.std(log_cond)  / np.sqrt(period_days)
+
+        cond_shocks    = cond_daily_mean + cond_daily_vol * np.random.standard_t(df=nu, size=(n_sims_int, sim_days_int))
+        cond_log_paths = np.hstack([np.zeros((n_sims_int, 1)), np.cumsum(cond_shocks, axis=1)])
+        cond_paths     = current_price * np.exp(cond_log_paths)
+
+    days = np.arange(sim_days_int + 1)
+
+    def percentile_bands(paths):
+        return {p: np.percentile(paths, p, axis=0) for p in [5, 25, 50, 75, 95]}
+
+    unc_bands  = percentile_bands(unc_paths)
+    cond_bands = percentile_bands(cond_paths) if has_conditional else None
+
+    # --- Fan chart ---
     fig_fan = go.Figure()
-    fig_fan.add_trace(go.Scatter(
-        x=days, y=pct_95, name='95th Pct',
-        line=dict(color='rgba(0,180,0,0.8)', dash='dash')
-    ))
-    fig_fan.add_trace(go.Scatter(
-        x=days, y=pct_75, name='75th Pct',
-        fill='tonexty', fillcolor='rgba(0,200,0,0.12)',
-        line=dict(color='rgba(0,160,0,0.6)')
-    ))
-    fig_fan.add_trace(go.Scatter(
-        x=days, y=pct_50, name='Median',
-        fill='tonexty', fillcolor='rgba(30,100,255,0.12)',
-        line=dict(color='royalblue', width=2)
-    ))
-    fig_fan.add_trace(go.Scatter(
-        x=days, y=pct_25, name='25th Pct',
-        fill='tonexty', fillcolor='rgba(255,140,0,0.12)',
-        line=dict(color='rgba(200,100,0,0.6)')
-    ))
-    fig_fan.add_trace(go.Scatter(
-        x=days, y=pct_5, name='5th Pct',
-        fill='tonexty', fillcolor='rgba(200,0,0,0.12)',
-        line=dict(color='rgba(200,0,0,0.8)', dash='dash')
-    ))
-    fig_fan.add_hline(y=current_price, line_dash='dot', line_color='gray',
+
+    # Unconditional fan (grey)
+    fig_fan.add_trace(go.Scatter(x=days, y=unc_bands[95], name='Unconditional 95th',
+        line=dict(color='rgba(150,150,150,0.6)', dash='dash'), legendgroup='unc'))
+    fig_fan.add_trace(go.Scatter(x=days, y=unc_bands[75], name='Unconditional 75th',
+        fill='tonexty', fillcolor='rgba(150,150,150,0.08)',
+        line=dict(color='rgba(150,150,150,0.4)'), legendgroup='unc'))
+    fig_fan.add_trace(go.Scatter(x=days, y=unc_bands[50], name='Unconditional Median',
+        fill='tonexty', fillcolor='rgba(150,150,150,0.08)',
+        line=dict(color='rgba(120,120,120,0.9)', width=2, dash='dot'), legendgroup='unc'))
+    fig_fan.add_trace(go.Scatter(x=days, y=unc_bands[25], name='Unconditional 25th',
+        fill='tonexty', fillcolor='rgba(150,150,150,0.08)',
+        line=dict(color='rgba(150,150,150,0.4)'), legendgroup='unc'))
+    fig_fan.add_trace(go.Scatter(x=days, y=unc_bands[5], name='Unconditional 5th',
+        fill='tonexty', fillcolor='rgba(150,150,150,0.08)',
+        line=dict(color='rgba(150,150,150,0.6)', dash='dash'), legendgroup='unc'))
+
+    # Conditional fan (coloured) — only if enough signals
+    if has_conditional:
+        fig_fan.add_trace(go.Scatter(x=days, y=cond_bands[95], name='After Trigger 95th',
+            line=dict(color='rgba(0,180,0,0.8)', dash='dash'), legendgroup='cond'))
+        fig_fan.add_trace(go.Scatter(x=days, y=cond_bands[75], name='After Trigger 75th',
+            fill='tonexty', fillcolor='rgba(0,200,0,0.12)',
+            line=dict(color='rgba(0,160,0,0.6)'), legendgroup='cond'))
+        fig_fan.add_trace(go.Scatter(x=days, y=cond_bands[50], name='After Trigger Median',
+            fill='tonexty', fillcolor='rgba(30,100,255,0.12)',
+            line=dict(color='royalblue', width=2), legendgroup='cond'))
+        fig_fan.add_trace(go.Scatter(x=days, y=cond_bands[25], name='After Trigger 25th',
+            fill='tonexty', fillcolor='rgba(255,140,0,0.12)',
+            line=dict(color='rgba(200,100,0,0.6)'), legendgroup='cond'))
+        fig_fan.add_trace(go.Scatter(x=days, y=cond_bands[5], name='After Trigger 5th',
+            fill='tonexty', fillcolor='rgba(200,0,0,0.12)',
+            line=dict(color='rgba(200,0,0,0.8)', dash='dash'), legendgroup='cond'))
+
+    fig_fan.add_hline(y=current_price, line_dash='dot', line_color='white',
                       annotation_text='Current Price')
+    trigger = experiment['trigger_symbol']
+    target  = experiment['target_symbol']
+    cond_label = f" | Coloured = after {trigger} triggers ({len(cond_raw)} signals, {best_period_key} basis)" if has_conditional else ""
     fig_fan.update_layout(
-        title=f"{experiment['target_symbol']} — Projected Paths: Next {sim_days} Days ({int(n_sims):,} scenarios)",
+        title=f"{target} — Next {sim_days_int} Days  |  Grey = any day{cond_label}",
         xaxis_title="Days Ahead",
         yaxis_title="Price",
-        legend=dict(x=0.01, y=0.99),
+        legend=dict(x=0.01, y=0.99, font=dict(size=11)),
         hovermode='x unified'
     )
     st.plotly_chart(fig_fan, use_container_width=True)
 
-    final_returns_pct = ((price_paths[:, -1] - current_price) / current_price) * 100
-    fp5, fp50, fp95 = np.percentile(final_returns_pct, [5, 50, 95])
-    prob_positive = float((final_returns_pct > 0).mean() * 100)
-    expected_return = float(np.mean(final_returns_pct))
+    if has_conditional:
+        st.caption(
+            f"**Grey** = unconditional (GDX on any random day).  "
+            f"**Coloured** = calibrated to the {len(cond_raw)} historical instances where "
+            f"{trigger} triggered this signal — these are the paths *most relevant to your trade*. "
+            f"If the coloured fan sits higher than the grey, the trigger adds real edge."
+        )
 
-    fig_hist = px.histogram(
-        final_returns_pct, nbins=100,
-        title=f"Distribution of {sim_days}-Day Returns — {experiment['target_symbol']}",
-        labels={'value': 'Return %', 'count': 'Scenarios'}
+    # --- Return distribution histogram ---
+    unc_final_ret  = ((unc_paths[:, -1]  - current_price) / current_price) * 100
+    cond_final_ret = ((cond_paths[:, -1] - current_price) / current_price) * 100 if has_conditional else None
+
+    fig_hist = go.Figure()
+    fig_hist.add_trace(go.Histogram(
+        x=unc_final_ret, nbinsx=100, name='Unconditional',
+        marker_color='rgba(150,150,150,0.5)', opacity=0.7
+    ))
+    if has_conditional:
+        fig_hist.add_trace(go.Histogram(
+            x=cond_final_ret, nbinsx=100, name=f'After {trigger} Trigger',
+            marker_color='rgba(30,100,255,0.5)', opacity=0.7
+        ))
+    fig_hist.update_layout(
+        barmode='overlay',
+        title=f"Distribution of {sim_days_int}-Day Returns — {target}",
+        xaxis_title="Return %", yaxis_title="Scenarios",
+        legend=dict(x=0.01, y=0.99)
     )
-    fig_hist.add_vline(x=fp5,  line_color='orange', line_dash='dash',
-                       annotation_text=f'5th: {fp5:.1f}%')
-    fig_hist.add_vline(x=fp50, line_color='royalblue', line_dash='dash',
-                       annotation_text=f'Median: {fp50:.1f}%')
-    fig_hist.add_vline(x=fp95, line_color='green', line_dash='dash',
-                       annotation_text=f'95th: {fp95:.1f}%')
-    fig_hist.add_vline(x=0, line_color='red', line_dash='solid',
-                       annotation_text='Breakeven')
+
+    # Reference lines on the conditional if available, else unconditional
+    ref = cond_final_ret if has_conditional else unc_final_ret
+    r5, r50, r95 = np.percentile(ref, [5, 50, 95])
+    fig_hist.add_vline(x=0,   line_color='red',       line_dash='solid', annotation_text='Breakeven')
+    fig_hist.add_vline(x=r5,  line_color='orange',    line_dash='dash',  annotation_text=f'5th: {r5:.1f}%')
+    fig_hist.add_vline(x=r50, line_color='royalblue', line_dash='dash',  annotation_text=f'Median: {r50:.1f}%')
+    fig_hist.add_vline(x=r95, line_color='green',     line_dash='dash',  annotation_text=f'95th: {r95:.1f}%')
     st.plotly_chart(fig_hist, use_container_width=True)
+
+    # --- Metrics (show conditional if available, else unconditional) ---
+    active = cond_final_ret if has_conditional else unc_final_ret
+    fp5, fp50, fp95 = np.percentile(active, [5, 50, 95])
+    prob_positive  = float((active > 0).mean() * 100)
+    expected_return = float(np.mean(active))
+    label = f"after {trigger} triggers" if has_conditional else "unconditional"
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Current Price", f"${current_price:.2f}")
+        st.metric("Current Price", f"${current_price:.2f}",
+            help="The last closing price used as the starting point for all simulated paths.")
     with col2:
         st.metric("Expected Return", f"{expected_return:.1f}%",
-                  f"${current_price * (1 + expected_return / 100):.2f}")
+            f"${current_price * (1 + expected_return / 100):.2f}",
+            help=f"Average return across {n_sims_int:,} simulated paths ({label}) at day {sim_days_int}.")
     with col3:
-        st.metric("Probability of Gain", f"{prob_positive:.1f}%")
+        st.metric("Probability of Gain", f"{prob_positive:.1f}%",
+            help=f"Share of {n_sims_int:,} simulations ({label}) that ended above the current price.")
     with col4:
         downside = abs(fp5)
         st.metric("95% Downside Risk", f"{downside:.1f}%",
-                  f"${current_price * (1 - downside / 100):.2f}", delta_color="inverse")
+            f"${current_price * (1 - downside / 100):.2f}",
+            delta_color="inverse",
+            help=f"Only the worst 5% of simulations ({label}) fell below this price. Stress-test floor, not a guaranteed stop.")
+
+    # --- Comparison table (unconditional vs conditional) ---
+    if has_conditional:
+        unc_r5, unc_r50, unc_r95 = np.percentile(unc_final_ret, [5, 50, 95])
+        unc_prob = float((unc_final_ret > 0).mean() * 100)
+        unc_exp  = float(np.mean(unc_final_ret))
+        rows = {
+            'Metric': ['Expected Return', 'Prob. of Gain', '5th Pct (downside)', 'Median', '95th Pct (upside)'],
+            f'Any Day (unconditional)': [
+                f"{unc_exp:.1f}%", f"{unc_prob:.1f}%",
+                f"{unc_r5:.1f}%", f"{unc_r50:.1f}%", f"{unc_r95:.1f}%"
+            ],
+            f'After {trigger} Triggers': [
+                f"{expected_return:.1f}%", f"{prob_positive:.1f}%",
+                f"{fp5:.1f}%", f"{fp50:.1f}%", f"{fp95:.1f}%"
+            ],
+        }
+        with st.expander("📊 Unconditional vs Trigger-Conditioned Comparison"):
+            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
 
     percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
-    pct_returns = np.percentile(final_returns_pct, percentiles)
-    pct_prices = current_price * (1 + pct_returns / 100)
+    pct_returns = np.percentile(active, percentiles)
+    pct_prices  = current_price * (1 + pct_returns / 100)
     with st.expander("📋 Full Percentile Breakdown"):
         st.dataframe(
             pd.DataFrame({
