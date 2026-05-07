@@ -956,8 +956,165 @@ def display_experiment_result(result, experiment):
             # Benchmark comparison
             create_benchmark_comparison(result, experiment)
 
+            st.divider()
+            run_monte_carlo_simulation(result, experiment)
+
         else:
             st.warning("No forward return data available for visualization")
+
+def run_monte_carlo_simulation(result, experiment):
+    """Simulate future price paths from current price using historical return statistics"""
+    st.subheader("🎲 Monte Carlo: Future Price Projection")
+
+    forward_analysis = result.get('forward_analysis', {})
+    if not forward_analysis:
+        st.info("No forward analysis data available for Monte Carlo simulation.")
+        return
+
+    # Pick the best-performing period to anchor simulation stats
+    best_period_key = None
+    best_avg = -999
+    for period, stats in forward_analysis.items():
+        if stats['valid_signals'] > 0 and stats['avg_return'] > best_avg:
+            best_avg = stats['avg_return']
+            best_period_key = period
+
+    if not best_period_key:
+        st.info("No valid signals to base simulation on.")
+        return
+
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        sim_days = st.number_input(
+            "Days to Simulate",
+            min_value=7, max_value=365, value=90,
+            key=f"mc_days_{result['experiment']}"
+        )
+    with col2:
+        n_sims = st.number_input(
+            "Number of Simulations",
+            min_value=500, max_value=20000, value=5000,
+            key=f"mc_sims_{result['experiment']}"
+        )
+    with col3:
+        nu = st.number_input(
+            "Fat-tail Degrees of Freedom",
+            min_value=2, max_value=30, value=5,
+            help="Lower = fatter tails. 3-5 is typical for financial assets.",
+            key=f"mc_nu_{result['experiment']}"
+        )
+
+    with st.spinner("Running simulation..."):
+        extended_start = (pd.to_datetime(experiment['start_date']) - timedelta(days=30)).strftime('%Y-%m-%d')
+        target_data, error = get_price_data(
+            experiment['target_symbol'],
+            extended_start,
+            experiment['end_date']
+        )
+
+    if error or target_data is None or len(target_data) < 20:
+        st.warning("Insufficient data for Monte Carlo simulation.")
+        return
+
+    close_prices = target_data['Close'].values
+    daily_log_returns = np.diff(np.log(close_prices.astype(float)))
+    daily_mean = np.mean(daily_log_returns)
+    daily_vol = np.std(daily_log_returns)
+    current_price = float(close_prices[-1])
+
+    shocks = daily_mean + daily_vol * np.random.standard_t(df=nu, size=(int(n_sims), int(sim_days)))
+    log_paths = np.hstack([np.zeros((int(n_sims), 1)), np.cumsum(shocks, axis=1)])
+    price_paths = current_price * np.exp(log_paths)
+
+    days = np.arange(int(sim_days) + 1)
+    pct_5  = np.percentile(price_paths, 5,  axis=0)
+    pct_25 = np.percentile(price_paths, 25, axis=0)
+    pct_50 = np.percentile(price_paths, 50, axis=0)
+    pct_75 = np.percentile(price_paths, 75, axis=0)
+    pct_95 = np.percentile(price_paths, 95, axis=0)
+
+    fig_fan = go.Figure()
+    fig_fan.add_trace(go.Scatter(
+        x=days, y=pct_95, name='95th Pct',
+        line=dict(color='rgba(0,180,0,0.8)', dash='dash')
+    ))
+    fig_fan.add_trace(go.Scatter(
+        x=days, y=pct_75, name='75th Pct',
+        fill='tonexty', fillcolor='rgba(0,200,0,0.12)',
+        line=dict(color='rgba(0,160,0,0.6)')
+    ))
+    fig_fan.add_trace(go.Scatter(
+        x=days, y=pct_50, name='Median',
+        fill='tonexty', fillcolor='rgba(30,100,255,0.12)',
+        line=dict(color='royalblue', width=2)
+    ))
+    fig_fan.add_trace(go.Scatter(
+        x=days, y=pct_25, name='25th Pct',
+        fill='tonexty', fillcolor='rgba(255,140,0,0.12)',
+        line=dict(color='rgba(200,100,0,0.6)')
+    ))
+    fig_fan.add_trace(go.Scatter(
+        x=days, y=pct_5, name='5th Pct',
+        fill='tonexty', fillcolor='rgba(200,0,0,0.12)',
+        line=dict(color='rgba(200,0,0,0.8)', dash='dash')
+    ))
+    fig_fan.add_hline(y=current_price, line_dash='dot', line_color='gray',
+                      annotation_text='Current Price')
+    fig_fan.update_layout(
+        title=f"{experiment['target_symbol']} — Projected Paths: Next {sim_days} Days ({int(n_sims):,} scenarios)",
+        xaxis_title="Days Ahead",
+        yaxis_title="Price",
+        legend=dict(x=0.01, y=0.99),
+        hovermode='x unified'
+    )
+    st.plotly_chart(fig_fan, use_container_width=True)
+
+    final_returns_pct = ((price_paths[:, -1] - current_price) / current_price) * 100
+    fp5, fp50, fp95 = np.percentile(final_returns_pct, [5, 50, 95])
+    prob_positive = float((final_returns_pct > 0).mean() * 100)
+    expected_return = float(np.mean(final_returns_pct))
+
+    fig_hist = px.histogram(
+        final_returns_pct, nbins=100,
+        title=f"Distribution of {sim_days}-Day Returns — {experiment['target_symbol']}",
+        labels={'value': 'Return %', 'count': 'Scenarios'}
+    )
+    fig_hist.add_vline(x=fp5,  line_color='orange', line_dash='dash',
+                       annotation_text=f'5th: {fp5:.1f}%')
+    fig_hist.add_vline(x=fp50, line_color='royalblue', line_dash='dash',
+                       annotation_text=f'Median: {fp50:.1f}%')
+    fig_hist.add_vline(x=fp95, line_color='green', line_dash='dash',
+                       annotation_text=f'95th: {fp95:.1f}%')
+    fig_hist.add_vline(x=0, line_color='red', line_dash='solid',
+                       annotation_text='Breakeven')
+    st.plotly_chart(fig_hist, use_container_width=True)
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Current Price", f"${current_price:.2f}")
+    with col2:
+        st.metric("Expected Return", f"{expected_return:.1f}%",
+                  f"${current_price * (1 + expected_return / 100):.2f}")
+    with col3:
+        st.metric("Probability of Gain", f"{prob_positive:.1f}%")
+    with col4:
+        downside = abs(fp5)
+        st.metric("95% Downside Risk", f"{downside:.1f}%",
+                  f"${current_price * (1 - downside / 100):.2f}", delta_color="inverse")
+
+    percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
+    pct_returns = np.percentile(final_returns_pct, percentiles)
+    pct_prices = current_price * (1 + pct_returns / 100)
+    with st.expander("📋 Full Percentile Breakdown"):
+        st.dataframe(
+            pd.DataFrame({
+                'Percentile': [f"{p}th" for p in percentiles],
+                'Return': [f"{r:.2f}%" for r in pct_returns],
+                'Price': [f"${p:.2f}" for p in pct_prices]
+            }),
+            use_container_width=True, hide_index=True
+        )
+
 
 def create_benchmark_comparison(result, experiment):
     """Create benchmark comparison for the pattern"""
