@@ -1189,8 +1189,8 @@ def run_monte_carlo_simulation(result, experiment):
     target  = experiment['target_symbol']
     cond_label = f" | Coloured = after {trigger} triggers ({len(cond_raw)} signals, {best_period_key} basis)" if has_conditional else ""
     fig_fan.update_layout(
-        title=f"{target} — Next {sim_days_int} Days  |  Grey = any day{cond_label}",
-        xaxis_title="Days Ahead",
+        title=f"{target} — {sim_days_int}-day price projection  |  Grey = any day{cond_label}",
+        xaxis_title="Days from today",
         yaxis_title="Price",
         legend=dict(x=0.01, y=0.99, font=dict(size=11)),
         hovermode='x unified'
@@ -1199,140 +1199,108 @@ def run_monte_carlo_simulation(result, experiment):
 
     if has_conditional:
         st.caption(
-            f"**Grey** = unconditional (GDX on any random day).  "
-            f"**Coloured** = calibrated to the {len(cond_raw)} historical instances where "
-            f"{trigger} triggered this signal — these are the paths *most relevant to your trade*. "
-            f"If the coloured fan sits higher than the grey, the trigger adds real edge."
+            f"**Grey band** = what {target} normally does on any random day. "
+            f"**Coloured band** = what {target} does specifically after {trigger} triggers "
+            f"(based on {len(cond_raw)} historical instances). "
+            f"If the coloured band sits higher, the trigger is genuinely predicting something useful."
         )
 
-    # --- Return distribution histogram ---
+    # --- Return distribution ---
     unc_final_ret  = ((unc_paths[:, -1]  - current_price) / current_price) * 100
     cond_final_ret = ((cond_paths[:, -1] - current_price) / current_price) * 100 if has_conditional else None
 
     fig_hist = go.Figure()
     fig_hist.add_trace(go.Histogram(
-        x=unc_final_ret, nbinsx=100, name='Unconditional',
+        x=unc_final_ret, nbinsx=100, name='Any random day',
         marker_color='rgba(150,150,150,0.5)', opacity=0.7
     ))
     if has_conditional:
         fig_hist.add_trace(go.Histogram(
-            x=cond_final_ret, nbinsx=100, name=f'After {trigger} Trigger',
+            x=cond_final_ret, nbinsx=100, name=f'After {trigger} triggers',
             marker_color='rgba(30,100,255,0.5)', opacity=0.7
         ))
     fig_hist.update_layout(
         barmode='overlay',
-        title=f"Distribution of {sim_days_int}-Day Returns — {target}",
-        xaxis_title="Return %", yaxis_title="Scenarios",
+        title=f"Spread of possible {sim_days_int}-day outcomes — {target}",
+        xaxis_title="Return % at end of period",
+        yaxis_title="Number of simulations",
         legend=dict(x=0.01, y=0.99)
     )
 
-    # Reference lines on the conditional if available, else unconditional
     ref = cond_final_ret if has_conditional else unc_final_ret
     r5, r50, r95 = np.percentile(ref, [5, 50, 95])
-    fig_hist.add_vline(x=0,   line_color='red',       line_dash='solid', annotation_text='Breakeven')
-    fig_hist.add_vline(x=r5,  line_color='orange',    line_dash='dash',  annotation_text=f'5th: {r5:.1f}%')
-    fig_hist.add_vline(x=r50, line_color='royalblue', line_dash='dash',  annotation_text=f'Median: {r50:.1f}%')
-    fig_hist.add_vline(x=r95, line_color='green',     line_dash='dash',  annotation_text=f'95th: {r95:.1f}%')
+    fig_hist.add_vline(x=0,   line_color='red',       line_dash='solid', annotation_text='Break even')
+    fig_hist.add_vline(x=r5,  line_color='orange',    line_dash='dash',  annotation_text=f'Worst 5%: {r5:.1f}%')
+    fig_hist.add_vline(x=r50, line_color='royalblue', line_dash='dash',  annotation_text=f'Most likely: {r50:.1f}%')
+    fig_hist.add_vline(x=r95, line_color='green',     line_dash='dash',  annotation_text=f'Best 5%: {r95:.1f}%')
     st.plotly_chart(fig_hist, use_container_width=True)
 
-    # --- Metrics (show conditional if available, else unconditional) ---
+    # --- Summary metrics ---
     active = cond_final_ret if has_conditional else unc_final_ret
     fp5, fp50, fp95 = np.percentile(active, [5, 50, 95])
-    prob_positive  = float((active > 0).mean() * 100)
+    prob_positive   = float((active > 0).mean() * 100)
     expected_return = float(np.mean(active))
-    label = f"after {trigger} triggers" if has_conditional else "unconditional"
+    ctx = f"after {trigger} triggers" if has_conditional else "on any day"
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
-        st.metric("Current Price", f"${current_price:.2f}",
-            help="The last closing price used as the starting point for all simulated paths.")
+        st.metric("Current price", f"${current_price:.2f}",
+            help="Starting point for all simulations.")
     with col2:
-        st.metric("Expected Return", f"{expected_return:.1f}%",
-            f"${current_price * (1 + expected_return / 100):.2f}",
-            help=f"Average return across {n_sims_int:,} simulated paths ({label}) at day {sim_days_int}.")
+        st.metric("Most likely price in {d} days".format(d=sim_days_int),
+            f"${current_price * (1 + r50 / 100):.2f}",
+            f"{r50:+.1f}%",
+            help=f"The median outcome across {n_sims_int:,} simulations ({ctx}). Half of paths ended above this, half below.")
     with col3:
-        st.metric("Probability of Gain", f"{prob_positive:.1f}%",
-            help=f"Share of {n_sims_int:,} simulations ({label}) that ended above the current price.")
+        st.metric("Chance it goes up", f"{prob_positive:.0f}%",
+            help=f"Share of {n_sims_int:,} simulations ({ctx}) that ended above today's price.")
     with col4:
         downside = abs(fp5)
-        st.metric("95% Downside Risk", f"{downside:.1f}%",
-            f"${current_price * (1 - downside / 100):.2f}",
+        st.metric("Worst realistic loss (1-in-20)",
+            f"{downside:.0f}%",
+            f"floor ~${current_price * (1 - downside / 100):.2f}",
             delta_color="inverse",
-            help=f"Only the worst 5% of simulations ({label}) fell below this price. Stress-test floor, not a guaranteed stop.")
+            help=f"Only 1 in 20 simulations ({ctx}) fell further than this. Think of it as a stress-test worst case.")
 
-    # --- Comparison table (unconditional vs conditional) ---
+    # --- Side-by-side comparison ---
     if has_conditional:
         unc_r5, unc_r50, unc_r95 = np.percentile(unc_final_ret, [5, 50, 95])
         unc_prob = float((unc_final_ret > 0).mean() * 100)
         unc_exp  = float(np.mean(unc_final_ret))
-        rows = {
-            'Metric': ['Expected Return', 'Prob. of Gain', '5th Pct (downside)', 'Median', '95th Pct (upside)'],
-            f'Any Day (unconditional)': [
-                f"{unc_exp:.1f}%", f"{unc_prob:.1f}%",
-                f"{unc_r5:.1f}%", f"{unc_r50:.1f}%", f"{unc_r95:.1f}%"
-            ],
-            f'After {trigger} Triggers': [
-                f"{expected_return:.1f}%", f"{prob_positive:.1f}%",
-                f"{fp5:.1f}%", f"{fp50:.1f}%", f"{fp95:.1f}%"
-            ],
-        }
-        with st.expander("📊 Unconditional vs Trigger-Conditioned Comparison"):
-            st.dataframe(pd.DataFrame(rows), use_container_width=True, hide_index=True)
+        with st.expander(f"📊 Does the {trigger} trigger actually change the outlook?"):
+            st.dataframe(pd.DataFrame({
+                'Outcome': ['Chance of gain', 'Most likely return (median)',
+                            'Average return', 'Worst 5% scenario', 'Best 5% scenario'],
+                f'Any random day': [
+                    f"{unc_prob:.0f}%", f"{unc_r50:+.1f}%",
+                    f"{unc_exp:+.1f}%", f"{unc_r5:+.1f}%", f"{unc_r95:+.1f}%"
+                ],
+                f'After {trigger} triggers': [
+                    f"{prob_positive:.0f}%", f"{r50:+.1f}%",
+                    f"{expected_return:+.1f}%", f"{fp5:+.1f}%", f"{fp95:+.1f}%"
+                ],
+            }), use_container_width=True, hide_index=True)
+            diff_prob = prob_positive - unc_prob
+            diff_med  = r50 - unc_r50
+            if abs(diff_prob) < 3 and abs(diff_med) < 5:
+                st.caption("The two columns look very similar — the trigger isn't meaningfully changing the odds.")
+            elif diff_prob > 0 and diff_med > 0:
+                st.caption(f"After the trigger fires, the chance of gain improves by {diff_prob:+.0f}% and the median outcome shifts by {diff_med:+.1f}%. The signal is adding edge.")
+            else:
+                st.caption("Mixed results — the trigger helps on some metrics but not others.")
 
-    percentiles = [1, 5, 10, 25, 50, 75, 90, 95, 99]
+    percentiles = [5, 10, 25, 50, 75, 90, 95]
     pct_returns = np.percentile(active, percentiles)
     pct_prices  = current_price * (1 + pct_returns / 100)
-    with st.expander("📋 Full Percentile Breakdown"):
-        st.dataframe(
-            pd.DataFrame({
-                'Percentile': [f"{p}th" for p in percentiles],
-                'Return': [f"{r:.2f}%" for r in pct_returns],
-                'Price': [f"${p:.2f}" for p in pct_prices]
-            }),
-            use_container_width=True, hide_index=True
-        )
+    with st.expander("📋 Full range of outcomes"):
+        st.dataframe(pd.DataFrame({
+            'Scenario': ['Worst 5%', 'Worst 10%', 'Below average', 'Middle (most likely)',
+                         'Above average', 'Best 10%', 'Best 5%'],
+            'Return': [f"{r:+.1f}%" for r in pct_returns],
+            'Price at end': [f"${p:.2f}" for p in pct_prices],
+        }), use_container_width=True, hide_index=True)
 
 
-def create_benchmark_comparison(result, experiment):
-    """Create benchmark comparison for the pattern"""
-    st.subheader("🎯 Benchmark Comparison")
-
-    try:
-        target_data, _ = get_price_data(
-            experiment['target_symbol'],
-            experiment['start_date'],
-            experiment['end_date']
-        )
-
-        if target_data is not None and len(target_data) > 1:
-            # Calculate buy-and-hold return
-            start_price = target_data.iloc[0]['Close']
-            end_price = target_data.iloc[-1]['Close']
-            buy_hold_return = ((end_price - start_price) / start_price) * 100
-
-            # Get best strategy return
-            forward_analysis = result.get('forward_analysis', {})
-            best_strategy_return = 0
-            best_period = None
-
-            for period, stats in forward_analysis.items():
-                if stats['valid_signals'] > 0:
-                    strategy_return = stats['total_return']
-                    if strategy_return > best_strategy_return:
-                        best_strategy_return = strategy_return
-                        best_period = period
-
-            col1, col2, col3 = st.columns(3)
-            with col1:
-                st.metric("Buy & Hold Return", f"{buy_hold_return:.2f}%")
-            with col2:
-                st.metric(f"Strategy Return ({best_period})", f"{best_strategy_return:.2f}%")
-            with col3:
-                outperformance = best_strategy_return - buy_hold_return
-                st.metric("Outperformance", f"{outperformance:.2f}%", delta=f"{outperformance:.2f}%")
-
-    except Exception as e:
-        st.caption(f"Benchmark comparison unavailable: {str(e)}")
 
 if __name__ == "__main__":
     try:
