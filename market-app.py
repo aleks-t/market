@@ -733,238 +733,322 @@ def run_all_experiments():
             display_experiment_result(result, experiment)
             st.divider()
 
+def _signal_verdict(stats, n_signals):
+    """Return (label, rec, emoji) based on stats quality"""
+    wr  = stats['win_rate']
+    avg = stats['avg_return']
+    std = stats['std_dev']
+    sharpe = (avg / std) if std > 0 else 0
+
+    if wr >= 62 and avg >= 1.5 and n_signals >= 15 and sharpe >= 0.25:
+        return 'STRONG SIGNAL', 'consider', '✅'
+    elif wr >= 55 and avg >= 0.5 and n_signals >= 10:
+        return 'MODERATE SIGNAL', 'caution', '⚡'
+    else:
+        return 'WEAK SIGNAL', 'skip', '⚠️'
+
+
+def _quality_score(sharpe):
+    if sharpe >= 1.0:  return 'Excellent'
+    if sharpe >= 0.5:  return 'Good'
+    if sharpe >= 0.3:  return 'Decent'
+    if sharpe >= 0.1:  return 'Poor'
+    return 'Very Poor'
+
+
+def _confidence_note(n):
+    if n >= 25: return f"{n} signals — solid sample size"
+    if n >= 15: return f"{n} signals — reasonable, but more data would help"
+    if n >= 8:  return f"{n} signals — limited, treat results with caution"
+    return f"{n} signals — too few to trust, results likely random"
+
+
 def display_experiment_result(result, experiment):
-    """Display comprehensive experiment results"""
+    """Display experiment results in plain English with actionable layout"""
+    trigger = experiment['trigger_symbol']
+    target  = experiment['target_symbol']
+
     st.subheader(f"📊 {result['experiment']}")
 
     if result.get('error'):
-        st.error(f"❌ {result['error']}")
+        st.error(f"Something went wrong: {result['error']}")
         return
 
     if result['signals'] == 0:
-        st.warning("⚠️ No signals found in this period")
+        st.warning(f"No signals found — {trigger} never met the trigger condition in this date range. Try a lower threshold or a longer lookback period.")
         return
 
-    # Multi-timeframe results table
-    st.subheader("📈 Forward Return Analysis")
-
     forward_analysis = result.get('forward_analysis', {})
+    if not forward_analysis:
+        st.warning("No return data available.")
+        return
 
-    if forward_analysis:
-        # Create summary table
-        summary_data = []
-        for period, stats in forward_analysis.items():
-            if stats['valid_signals'] > 0:
-                summary_data.append({
-                    'Period': period,
-                    'Signals': stats['valid_signals'],
-                    'Avg Return': f"{stats['avg_return']:.2f}%",
-                    'Win Rate': f"{stats['win_rate']:.1f}%",
-                    'Best': f"{stats['best_signal']:.2f}%",
-                    'Worst': f"{stats['worst_signal']:.2f}%",
-                    'Total Return': f"{stats['total_return']:.2f}%",
-                    'Risk (Std)': f"{stats['std_dev']:.2f}%"
-                })
+    # ── Best period ──────────────────────────────────────────────────────────
+    best_period = max(
+        (p for p, s in forward_analysis.items() if s['valid_signals'] > 0),
+        key=lambda p: forward_analysis[p]['avg_return'],
+        default=None
+    )
+    if not best_period:
+        st.warning("No valid forward return data.")
+        return
 
-        if summary_data:
-            df_summary = pd.DataFrame(summary_data)
-            st.dataframe(df_summary, use_container_width=True)
+    best = forward_analysis[best_period]
+    sharpe = (best['avg_return'] / best['std_dev']) if best['std_dev'] > 0 else 0
+    verdict_label, rec, verdict_emoji = _signal_verdict(best, best['valid_signals'])
 
-            # Visualization
-            st.subheader("📊 Performance by Time Period")
+    # ── Verdict banner ───────────────────────────────────────────────────────
+    if rec == 'consider':
+        st.success(f"{verdict_emoji} **{verdict_label}** — This pattern has a real edge worth acting on.")
+    elif rec == 'caution':
+        st.warning(f"{verdict_emoji} **{verdict_label}** — There's a slight edge here, but it's thin. Proceed with small size.")
+    else:
+        st.error(f"{verdict_emoji} **{verdict_label}** — The numbers don't support trading this. Not worth the risk.")
 
-            periods = [data['Period'] for data in summary_data]
-            avg_returns = [float(data['Avg Return'].strip('%')) for data in summary_data]
-            win_rates = [float(data['Win Rate'].strip('%')) for data in summary_data]
+    # ── Plain-English summary ────────────────────────────────────────────────
+    wins = round(best['win_rate'] / 100 * best['valid_signals'])
+    losses = best['valid_signals'] - wins
+    direction_note = "went up" if best['avg_return'] >= 0 else "went down"
+    st.markdown(
+        f"> Out of **{best['valid_signals']} times** {trigger} triggered, "
+        f"{target} {direction_note} over the next {best_period} **{wins} times** and fell **{losses} times** "
+        f"({best['win_rate']:.0f}% win rate). "
+        f"The average move was **{best['avg_return']:+.2f}%** — "
+        f"best trade was **+{best['best_signal']:.1f}%**, worst was **{best['worst_signal']:.1f}%**."
+    )
+    st.caption(_confidence_note(best['valid_signals']))
 
-            fig = go.Figure()
+    st.divider()
 
-            # Add bars and line
-            fig.add_trace(go.Bar(
-                x=periods,
-                y=avg_returns,
-                name='Avg Return %',
-                marker_color='lightblue',
-                yaxis='y'
+    # ── What happened after the trigger? ────────────────────────────────────
+    st.subheader("📋 What happened after the trigger fired?")
+    summary_data = []
+    for period, stats in forward_analysis.items():
+        if stats['valid_signals'] == 0:
+            continue
+        w = round(stats['win_rate'] / 100 * stats['valid_signals'])
+        l = stats['valid_signals'] - w
+        summary_data.append({
+            'Hold for': period,
+            'Times triggered': stats['valid_signals'],
+            'Trades that made money': f"{w} of {stats['valid_signals']} ({stats['win_rate']:.0f}%)",
+            'Avg profit / loss': f"{stats['avg_return']:+.2f}%",
+            'Best trade': f"+{stats['best_signal']:.1f}%",
+            'Worst trade': f"{stats['worst_signal']:.1f}%",
+            'Total if you traded all': f"{stats['total_return']:+.1f}%",
+            'Typical swing': f"±{stats['std_dev']:.1f}%",
+        })
+
+    if summary_data:
+        st.dataframe(pd.DataFrame(summary_data), use_container_width=True, hide_index=True)
+
+    # ── Win rate vs avg return chart ─────────────────────────────────────────
+    st.subheader("📊 How did the signal perform over different hold times?")
+    periods    = [d['Hold for'] for d in summary_data]
+    avg_rets   = [float(d['Avg profit / loss'].replace('%','')) for d in summary_data]
+    win_rates  = [float(d['Trades that made money'].split('(')[1].replace('%)','')) for d in summary_data]
+
+    fig = go.Figure()
+    fig.add_trace(go.Bar(
+        x=periods, y=avg_rets, name='Avg Profit/Loss %',
+        marker_color=['#2ecc71' if r >= 0 else '#e74c3c' for r in avg_rets],
+        yaxis='y'
+    ))
+    fig.add_trace(go.Scatter(
+        x=periods, y=win_rates, mode='lines+markers',
+        name='% of trades that made money',
+        line=dict(color='#f39c12', width=3), marker=dict(size=9),
+        yaxis='y2'
+    ))
+    fig.add_hline(y=50, line_dash='dot', line_color='gray',
+                  annotation_text='50% (coin flip)', yref='y2')
+    fig.update_layout(
+        title=f"Average gain and win rate for each holding period",
+        xaxis_title="How long you held after the trigger",
+        yaxis=dict(title="Avg Profit / Loss %", side="left"),
+        yaxis2=dict(title="% of trades that made money", side="right",
+                    overlaying="y", range=[0, 100]),
+        legend=dict(x=0.01, y=0.99),
+        hovermode='x unified'
+    )
+    st.plotly_chart(fig, use_container_width=True)
+
+    # ── Signal timeline ──────────────────────────────────────────────────────
+    if result.get('signal_details'):
+        st.subheader(f"📅 Every trade, plotted over time ({best_period} hold)")
+        signals_df = pd.DataFrame(result['signal_details'])
+        signals_df['date'] = pd.to_datetime(signals_df['date'])
+        primary_period = next(
+            (p for p in ['90d','60d','30d','15d','7d']
+             if p in signals_df.columns and signals_df[p].notna().any()), None
+        )
+        if primary_period:
+            valid = signals_df[signals_df[primary_period].notna()].copy()
+            valid['Running total'] = valid[primary_period].cumsum()
+            valid['Result'] = valid[primary_period].apply(lambda x: 'Profit' if x > 0 else 'Loss')
+
+            fig2 = px.scatter(valid, x='date', y='Running total', color='Result',
+                              title=f"Running total profit/loss if you traded every signal ({primary_period} hold)",
+                              labels={'Running total': 'Running total profit/loss (%)', 'date': 'When the trigger fired'},
+                              color_discrete_map={'Profit': '#2ecc71', 'Loss': '#e74c3c'})
+            fig2.add_trace(go.Scatter(
+                x=valid['date'], y=valid['Running total'],
+                mode='lines', name='Cumulative P&L',
+                line=dict(color='royalblue', width=2)
             ))
+            fig2.add_hline(y=0, line_dash='dash', line_color='gray',
+                           annotation_text='Break even')
+            st.plotly_chart(fig2, use_container_width=True)
 
-            fig.add_trace(go.Scatter(
-                x=periods,
-                y=win_rates,
-                mode='lines+markers',
-                name='Win Rate %',
-                line=dict(color='red', width=3),
-                marker=dict(size=8),
-                yaxis='y2'
-            ))
+    st.divider()
 
-            fig.update_layout(
-                title="Average Returns vs Win Rates by Time Period",
-                xaxis_title="Time Period",
-                yaxis=dict(title="Average Return %", side="left"),
-                yaxis2=dict(title="Win Rate %", side="right", overlaying="y"),
-                legend=dict(x=0.01, y=0.99),
-                hovermode='x unified'
+    # ── Should I trade this? ─────────────────────────────────────────────────
+    st.subheader("🎯 Should I trade this?")
+
+    period_days_val = len(pd.date_range(experiment['start_date'], experiment['end_date']))
+    annual_return = (best['avg_return'] * best['valid_signals'] * 365) / period_days_val if period_days_val > 0 else 0
+    profit_factor = abs(best['best_signal'] / best['worst_signal']) if best['worst_signal'] != 0 else 0
+
+    if rec == 'consider':
+        st.success(f"""
+**Verdict: Consider trading this pattern**
+
+When {trigger} triggers, buy {target} and hold for {best_period}.
+- You'd have made money on **{best['win_rate']:.0f}%** of trades — roughly **{wins} wins out of {best['valid_signals']}**
+- Average gain per trade: **{best['avg_return']:+.2f}%**
+- Estimated yearly return if you follow it consistently: **{annual_return:.1f}%**
+
+**How to trade it:** Wait for {trigger} to meet the trigger condition, enter {target} at the next open, exit after {best_period.replace('d',' days')}.
+Set a stop-loss around **{abs(best['worst_signal']) / 2:.1f}%** below entry to limit downside.
+        """)
+    elif rec == 'caution':
+        st.warning(f"""
+**Verdict: Proceed with caution — thin edge**
+
+The win rate is above a coin flip ({best['win_rate']:.0f}%), but the average gain is small ({best['avg_return']:+.2f}%).
+Fees, slippage, and a few bad trades could wipe out the edge entirely.
+
+**If you trade it:** Keep position size small (no more than 2–3% of portfolio per trade).
+Only trade it over the {best_period.replace('d',' day')} timeframe — the edge gets weaker beyond that.
+        """)
+    else:
+        best_alt = max(forward_analysis.items(),
+                       key=lambda x: x[1]['win_rate'] if x[1]['valid_signals'] > 0 else 0)
+        st.error(f"""
+**Verdict: Skip this trade**
+
+A **{best['win_rate']:.0f}% win rate** with only **{best['avg_return']:+.2f}% average gain** isn't enough to trade profitably once you account for costs.
+The worst single loss was **{best['worst_signal']:.1f}%** — that alone could wipe out many winning trades.
+
+**Try instead:** Lower the trigger threshold, test a longer lookback, or flip the direction (e.g. test what happens when {trigger} *falls* instead of rises).
+        """)
+
+    st.divider()
+
+    # ── Key numbers ──────────────────────────────────────────────────────────
+    st.subheader("📌 Key Numbers at a Glance")
+
+    if best['win_rate'] > 95:
+        st.warning(
+            f"⚠️ **{best['win_rate']:.0f}% win rate is suspiciously high.** "
+            "This often happens when testing during a strong bull market — any strategy looks great when everything goes up. "
+            "Re-run this on 2022 data (a down year) to see if it holds."
+        )
+
+    col1, col2, col3, col4 = st.columns(4)
+    with col1:
+        st.metric("Best holding period", best_period,
+                  f"{best['avg_return']:+.2f}% avg per trade",
+                  help="The holding period that produced the highest average return. This is when to exit.")
+    with col2:
+        st.metric("Times it triggered", best['valid_signals'],
+                  help="How many times the trigger fired in your date range. Under 15 is too few to be confident.")
+    with col3:
+        st.metric("Trades that made money", f"{best['win_rate']:.0f}%",
+                  help="60–80% is strong. Below 55% and the edge is questionable. Above 95% is likely too good to be true.")
+    with col4:
+        st.metric("Estimated yearly return", f"{annual_return:.1f}%",
+                  help="What you'd earn per year if you followed this signal consistently. S&P 500 averages ~10%/year.")
+
+    # ── Risk ─────────────────────────────────────────────────────────────────
+    st.subheader("🛡️ Risk Check")
+    col1, col2, col3 = st.columns(3)
+    with col1:
+        quality = _quality_score(sharpe)
+        st.metric("Signal quality score", quality,
+                  f"({sharpe:.2f} raw)",
+                  help="How much return you get for the risk you take. Excellent = great reward vs risk. Very Poor = barely worth the risk.")
+    with col2:
+        st.metric("Biggest single loss", f"{abs(best['worst_signal']):.1f}%",
+                  help="The worst individual trade in your test period. Your stop-loss should be set before this point.")
+    with col3:
+        st.metric("Biggest win vs biggest loss", f"{profit_factor:.1f}×",
+                  help="How many times larger your best win was vs your worst loss. Above 2× means your upside outweighs your downside.")
+
+    # ── AI Analysis ──────────────────────────────────────────────────────────
+    if experiment.get('enable_ai', True):
+        with st.expander("🤖 AI Deep-Dive Analysis", expanded=True):
+            with st.spinner("Analysing pattern..."):
+                analysis = get_ai_analysis(
+                    result['experiment'], trigger, target, result
+                )
+            st.write(analysis)
+    else:
+        st.info("AI analysis is turned off for this experiment.")
+
+    # ── Benchmark ────────────────────────────────────────────────────────────
+    st.subheader("📏 Did the signal beat just buying and holding?")
+    try:
+        target_data, _ = get_price_data(target, experiment['start_date'], experiment['end_date'])
+        if target_data is not None and len(target_data) > 1:
+            bh = ((float(target_data.iloc[-1]['Close']) - float(target_data.iloc[0]['Close']))
+                  / float(target_data.iloc[0]['Close'])) * 100
+            best_strat = max(
+                (s['total_return'] for s in forward_analysis.values() if s['valid_signals'] > 0),
+                default=0
             )
+            best_strat_period = max(
+                (p for p, s in forward_analysis.items() if s['valid_signals'] > 0),
+                key=lambda p: forward_analysis[p]['total_return'], default='—'
+            )
+            outperf = best_strat - bh
 
-            st.plotly_chart(fig, use_container_width=True)
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                st.metric("Buy & hold {target} return".format(target=target),
+                          f"{bh:+.1f}%",
+                          help=f"If you had just bought {target} at the start and held, this is what you'd have made.")
+            with col2:
+                st.metric(f"Signal strategy return ({best_strat_period})",
+                          f"{best_strat:+.1f}%",
+                          help="Total return if you only bought when the signal fired and held for the best period.")
+            with col3:
+                delta_color = "normal" if outperf >= 0 else "inverse"
+                st.metric("Extra return vs buy & hold",
+                          f"{outperf:+.1f}%",
+                          delta=f"{outperf:+.1f}%",
+                          delta_color=delta_color,
+                          help="Positive = the signal beat buy & hold. Negative = you'd have been better off just holding.")
 
-            # Signal timeline
-            if result.get('signal_details'):
-                st.subheader("📅 Signal Timeline")
-
-                signals_df = pd.DataFrame(result['signal_details'])
-                signals_df['date'] = pd.to_datetime(signals_df['date'])
-
-                # Choose primary period for timeline
-                primary_period = None
-                for period in ['90d', '60d', '30d', '15d', '7d']:
-                    if period in signals_df.columns and signals_df[period].notna().any():
-                        primary_period = period
-                        break
-
-                if primary_period:
-                    # Create cumulative return chart
-                    valid_signals = signals_df[signals_df[primary_period].notna()].copy()
-                    valid_signals['cumulative_return'] = valid_signals[primary_period].cumsum()
-                    valid_signals['trade_result'] = valid_signals[primary_period].apply(
-                        lambda x: 'Win' if x > 0 else 'Loss')
-
-                    fig = px.scatter(valid_signals,
-                                     x='date',
-                                     y='cumulative_return',
-                                     color='trade_result',
-                                     title=f"Cumulative Returns Over Time ({primary_period} holding period)",
-                                     labels={'cumulative_return': f'Cumulative Return % ({primary_period})',
-                                             'date': 'Signal Date'},
-                                     color_discrete_map={'Win': 'green', 'Loss': 'red'})
-
-                    # Add cumulative line
-                    fig.add_trace(go.Scatter(
-                        x=valid_signals['date'],
-                        y=valid_signals['cumulative_return'],
-                        mode='lines',
-                        name='Cumulative Return',
-                        line=dict(color='blue', width=2)
-                    ))
-
-                    fig.add_hline(y=0, line_dash="dash", line_color="gray")
-                    st.plotly_chart(fig, use_container_width=True)
-
-            # Get best performing period
-            best_period = None
-            best_return = -999
-            for period, stats in forward_analysis.items():
-                if stats['valid_signals'] > 0 and stats['avg_return'] > best_return:
-                    best_return = stats['avg_return']
-                    best_period = period
-
-            # Trading Stats Summary
-            st.subheader("💼 Trading Summary")
-
-            if best_period:
-                best_stats = forward_analysis[best_period]
-
-                # Reality check warning for unrealistic win rates
-                if best_stats['win_rate'] > 95:
-                    st.warning(f"""
-                    ⚠️ **Reality Check**: {best_stats['win_rate']:.0f}% win rate is extremely suspicious!
-                    
-                    **Why this is likely misleading:**
-                    • Testing during bull market period
-                    • Long holding periods mask true signal strength
-                    • Any random strategy would look good in strong markets
-                    
-                    **To verify this pattern:**
-                    • Test during 2022 bear market (-18% SPY return)
-                    • Use shorter periods (7-30 days, not {best_period})
-                    • Compare to random entry dates
-                    """)
-
-                col1, col2, col3, col4 = st.columns(4)
-                with col1:
-                    st.metric(
-                        "Best Time Period",
-                        best_period,
-                        f"{best_stats['avg_return']:.2f}% avg",
-                        help="🏆 The holding period (7d, 30d, etc.) that produced the highest average returns. This is your optimal exit timing for this pattern."
-                    )
-                with col2:
-                    st.metric(
-                        "Total Signals", 
-                        best_stats['valid_signals'],
-                        help="📊 Number of times this pattern triggered during analysis. More signals = more statistical confidence, but need 20+ for reliability."
-                    )
-                with col3:
-                    st.metric(
-                        "Win Rate", 
-                        f"{best_stats['win_rate']:.1f}%",
-                        help="🎯 Percentage of trades that were profitable. 60-80% is excellent. Above 95% is usually too good to be true."
-                    )
-                with col4:
-                    # Calculate annualized return estimate
-                    period_days = len(pd.date_range(experiment['start_date'], experiment['end_date']))
-                    annual_return = (best_stats['avg_return'] * best_stats['valid_signals'] * 365) / period_days
-                    st.metric(
-                        "Annualized Return", 
-                        f"{annual_return:.1f}%",
-                        help="📈 Expected yearly return if you followed this strategy consistently. Compare to S&P 500 (~10% annually). Above 20% is very good."
-                    )
-
-                # Risk metrics
-                st.subheader("📊 Risk Metrics")
-                col1, col2, col3 = st.columns(3)
-
-                with col1:
-                    sharpe_approx = (best_stats['avg_return'] / best_stats['std_dev']) if best_stats['std_dev'] > 0 else 0
-                    st.metric(
-                        "Sharpe Ratio (approx)", 
-                        f"{sharpe_approx:.2f}",
-                        help="Risk-adjusted return measure. >0.5 is decent, >1.0 is great, >2.0 is excellent. Higher = better returns for the risk taken."
-                    )
-
-                with col2:
-                    max_loss = abs(best_stats['worst_signal'])
-                    st.metric(
-                        "Max Single Loss", 
-                        f"{max_loss:.2f}%",
-                        help="The worst single trade result - your maximum possible loss on any one trade. This is your worst-case scenario."
-                    )
-
-                with col3:
-                    profit_factor = abs(best_stats['best_signal'] / best_stats['worst_signal']) if best_stats['worst_signal'] != 0 else float('inf')
-                    st.metric(
-                        "Best/Worst Ratio", 
-                        f"{profit_factor:.2f}",
-                        help="Best trade ÷ Worst trade. Shows if your wins are bigger than your losses. >2.0 means wins are twice as big as losses."
-                    )
-
-            # AI Analysis
-            if experiment.get('enable_ai', True):
-                with st.expander("🎓 AI Analysis & Trading Strategy", expanded=True):
-                    with st.spinner("Generating AI analysis..."):
-                        analysis = get_ai_analysis(
-                            result['experiment'],
-                            experiment['trigger_symbol'],
-                            experiment['target_symbol'],
-                            result
-                        )
-                    st.write(analysis)
+            if outperf < 0:
+                st.caption(
+                    f"The signal strategy returned {best_strat:+.1f}% vs {bh:+.1f}% for buy & hold. "
+                    f"You'd have made {abs(outperf):.1f}% more by simply buying {target} and doing nothing."
+                )
             else:
-                st.info("🤖 AI Analysis disabled for this experiment")
+                st.caption(
+                    f"The signal strategy beat buy & hold by {outperf:.1f}%. "
+                    f"The trigger is adding real value on top of just owning {target}."
+                )
+    except Exception:
+        pass
 
-            # Benchmark comparison
-            create_benchmark_comparison(result, experiment)
-
-            st.divider()
-            run_monte_carlo_simulation(result, experiment)
-
-        else:
-            st.warning("No forward return data available for visualization")
+    st.divider()
+    run_monte_carlo_simulation(result, experiment)
 
 def run_monte_carlo_simulation(result, experiment):
     """Simulate future price paths — unconditional vs conditioned on trigger signal"""
-    st.subheader("🎲 Monte Carlo: Future Price Projection")
+    st.subheader("🎲 Where could the price go from here?")
 
     forward_analysis = result.get('forward_analysis', {})
     if not forward_analysis:
@@ -983,24 +1067,29 @@ def run_monte_carlo_simulation(result, experiment):
         st.info("No valid signals to base simulation on.")
         return
 
+    st.caption(
+        "Runs thousands of possible futures using the asset's historical volatility. "
+        "Grey = any random day. Coloured = specifically after your trigger fires."
+    )
     col1, col2, col3 = st.columns(3)
     with col1:
         n_sims = st.number_input(
-            "Number of Simulations",
+            "Number of simulations",
             min_value=500, max_value=20000, value=5000,
+            help="More simulations = smoother, more reliable results. 5,000 is a good balance.",
             key=f"mc_sims_{result['experiment']}"
         )
     with col2:
         sim_days = st.number_input(
-            "Days to Simulate",
+            "How many days to project forward",
             min_value=7, max_value=365, value=90,
             key=f"mc_days_{result['experiment']}"
         )
     with col3:
         nu = st.number_input(
-            "Fat-tail Degrees of Freedom",
+            "Tail-risk sensitivity",
             min_value=2, max_value=30, value=5,
-            help="Lower = fatter tails. 3-5 is typical for financial assets.",
+            help="Lower = models more extreme crashes and spikes (like real markets). Keep between 3–7.",
             key=f"mc_nu_{result['experiment']}"
         )
 
