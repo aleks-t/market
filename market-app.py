@@ -117,15 +117,14 @@ class MarketScout:
         except Exception:
             return {}
 
-    def run_experiment(self, experiment):
-        """Run experiment with proper forward-looking analysis - FIXED VERSION"""
+    def run_experiment(self, experiment, silent=False):
+        """Run experiment with proper forward-looking analysis"""
         try:
-            progress_bar = st.progress(0)
-            status_text = st.empty()
-
-            # Fetch trigger data
-            status_text.text("📈 Fetching trigger symbol data...")
-            progress_bar.progress(25)
+            if not silent:
+                progress_bar = st.progress(0)
+                status_text = st.empty()
+                status_text.text("📈 Fetching trigger symbol data...")
+                progress_bar.progress(25)
 
             trigger_data, trigger_error = get_price_data(
                 experiment['trigger_symbol'],
@@ -134,12 +133,13 @@ class MarketScout:
             )
 
             if trigger_error:
-                st.error(f"❌ Trigger data error: {trigger_error}")
+                if not silent:
+                    st.error(f"❌ Trigger data error: {trigger_error}")
                 return self._empty_result(experiment['name'], trigger_error)
 
-            # Fetch target data (extend end date to get forward returns)
-            status_text.text("🎯 Fetching target symbol data...")
-            progress_bar.progress(50)
+            if not silent:
+                status_text.text("🎯 Fetching target symbol data...")
+                progress_bar.progress(50)
 
             max_forward_days = max(experiment['forward_periods'])
             extended_end = pd.to_datetime(experiment['end_date']) + timedelta(days=max_forward_days + 50)
@@ -151,15 +151,16 @@ class MarketScout:
             )
 
             if target_error:
-                st.error(f"❌ Target data error: {target_error}")
+                if not silent:
+                    st.error(f"❌ Target data error: {target_error}")
                 return self._empty_result(experiment['name'], target_error)
 
-            status_text.text("🔍 Scanning for signal patterns...")
-            progress_bar.progress(75)
+            if not silent:
+                status_text.text("🔍 Scanning for signal patterns...")
+                progress_bar.progress(75)
 
             signals = []
 
-            # Scan through trigger data for signals
             for i in range(len(trigger_data)):
                 try:
                     condition_met = self.check_condition(
@@ -178,27 +179,24 @@ class MarketScout:
                                 experiment['forward_periods']
                             )
 
-                            # Only add signal if we have at least one valid forward return
                             if any(v is not None for v in forward_returns.values()):
                                 trigger_price = float(trigger_data.iloc[i]['Close'])
                                 target_price = float(target_data.loc[signal_date]['Close'])
 
-                                signal_data = {
+                                signals.append({
                                     'date': signal_date.strftime('%Y-%m-%d'),
                                     'trigger_price': trigger_price,
                                     'target_price': target_price,
                                     **forward_returns
-                                }
-
-                                signals.append(signal_data)
+                                })
 
                 except Exception:
                     continue
 
-            status_text.text("📊 Calculating performance metrics...")
-            progress_bar.progress(100)
+            if not silent:
+                status_text.text("📊 Calculating performance metrics...")
+                progress_bar.progress(100)
 
-            # Calculate summary statistics for each forward period separately
             results = {
                 'experiment': experiment['name'],
                 'trigger_symbol': experiment['trigger_symbol'],
@@ -208,52 +206,42 @@ class MarketScout:
                 'forward_analysis': {}
             }
 
-            # Analyze each forward period independently
             for period in experiment['forward_periods']:
                 period_key = f'{period}d'
-
-                # Get only the returns for THIS specific period
-                valid_returns = []
-                for signal in signals:
-                    if period_key in signal and signal[period_key] is not None:
-                        valid_returns.append(signal[period_key])
+                valid_returns = [
+                    s[period_key] for s in signals
+                    if period_key in s and s[period_key] is not None
+                ]
 
                 if valid_returns:
-                    valid_returns_array = np.array(valid_returns)
-
+                    arr = np.array(valid_returns)
                     results['forward_analysis'][period_key] = {
                         'valid_signals': len(valid_returns),
-                        'avg_return': float(np.mean(valid_returns_array)),
-                        'win_rate': float((valid_returns_array > 0).mean() * 100),
-                        'best_signal': float(np.max(valid_returns_array)),
-                        'worst_signal': float(np.min(valid_returns_array)),
-                        'std_dev': float(np.std(valid_returns_array)),
-                        'total_return': float(np.sum(valid_returns_array))
+                        'avg_return':    float(np.mean(arr)),
+                        'win_rate':      float((arr > 0).mean() * 100),
+                        'best_signal':   float(np.max(arr)),
+                        'worst_signal':  float(np.min(arr)),
+                        'std_dev':       float(np.std(arr)),
+                        'total_return':  float(np.sum(arr))
                     }
                 else:
                     results['forward_analysis'][period_key] = {
-                        'valid_signals': 0,
-                        'avg_return': 0,
-                        'win_rate': 0,
-                        'best_signal': 0,
-                        'worst_signal': 0,
-                        'std_dev': 0,
-                        'total_return': 0
+                        'valid_signals': 0, 'avg_return': 0, 'win_rate': 0,
+                        'best_signal': 0, 'worst_signal': 0, 'std_dev': 0, 'total_return': 0
                     }
 
-            status_text.text("✅ Analysis complete!")
-            progress_bar.progress(100)
-
-            # Clear status after a moment
-            import time
-            time.sleep(1)
-            status_text.empty()
-            progress_bar.empty()
+            if not silent:
+                import time
+                status_text.text("✅ Analysis complete!")
+                time.sleep(1)
+                status_text.empty()
+                progress_bar.empty()
 
             return results
 
         except Exception as e:
-            st.error(f"❌ Experiment failed: {str(e)}")
+            if not silent:
+                st.error(f"❌ Experiment failed: {str(e)}")
             return self._empty_result(experiment['name'], str(e))
 
     def _empty_result(self, name, error):
@@ -267,21 +255,167 @@ class MarketScout:
         }
 
 # Utility Functions
+SYMBOL_MAP = {
+    # ── Crypto ──────────────────────────────────────────────────────────────
+    'BTC': 'BTC-USD', 'BITCOIN': 'BTC-USD',
+    'ETH': 'ETH-USD', 'ETHEREUM': 'ETH-USD',
+    'SOL': 'SOL-USD', 'BNB': 'BNB-USD', 'XRP': 'XRP-USD',
+
+    # ── US Macro ─────────────────────────────────────────────────────────────
+    'DXY': 'DX-Y.NYB', 'DOLLAR': 'DX-Y.NYB',
+    'VIX': '^VIX', 'FEAR': '^VIX',
+    'TNX': '^TNX', '10Y': '^TNX', '10YR': '^TNX',
+    'TYX': '^TYX', '30Y': '^TYX',
+    'FVX': '^FVX', '5Y': '^FVX',
+
+    # ── Precious Metals ───────────────────────────────────────────────────────
+    'GOLD': 'GC=F', 'XAU': 'GC=F',
+    'SILVER': 'SI=F', 'XAG': 'SI=F',
+    'PLATINUM': 'PL=F', 'XPT': 'PL=F',
+    'PALLADIUM': 'PA=F', 'XPD': 'PA=F',
+
+    # ── Industrial Metals ─────────────────────────────────────────────────────
+    'COPPER': 'HG=F', 'CU': 'HG=F',
+    'ALUMINUM': 'ALI=F', 'ALUMINIUM': 'ALI=F', 'AL': 'ALI=F',
+    'STEEL': 'SLX',        # Steel ETF — no clean futures via yfinance
+    'IRON': 'SLX',         # Closest proxy
+
+    # ── Energy ────────────────────────────────────────────────────────────────
+    'OIL': 'CL=F', 'CRUDE': 'CL=F', 'WTI': 'CL=F',
+    'BRENT': 'BZ=F',
+    'GAS': 'NG=F', 'NATGAS': 'NG=F', 'NATURALGAS': 'NG=F',
+    'GASOLINE': 'RB=F',
+    'HEATING': 'HO=F',
+
+    # ── Agricultural ──────────────────────────────────────────────────────────
+    'CORN': 'ZC=F',
+    'WHEAT': 'ZW=F',
+    'SOYBEANS': 'ZS=F', 'SOY': 'ZS=F',
+    'SOYOIL': 'ZL=F',
+    'COFFEE': 'KC=F',
+    'SUGAR': 'SB=F',
+    'COTTON': 'CT=F',
+    'COCOA': 'CC=F',
+    'LUMBER': 'LBS=F',
+
+    # ── US Indices ────────────────────────────────────────────────────────────
+    'SPX': '^GSPC', 'SP500': '^GSPC', 'S&P': '^GSPC',
+    'NDX': '^NDX', 'NASDAQ': '^IXIC',
+    'DOW': '^DJI', 'DJIA': '^DJI',
+    'RUT': '^RUT', 'RUSSELL': '^RUT',
+
+    # ── International Indices ─────────────────────────────────────────────────
+    'FTSE': '^FTSE', 'UK': '^FTSE',
+    'DAX': '^GDAXI', 'GERMANY': '^GDAXI',
+    'CAC': '^FCHI', 'FRANCE': '^FCHI',
+    'NIKKEI': '^N225', 'JAPAN': '^N225',
+    'HANGSENG': '^HSI', 'HSI': '^HSI', 'HK': '^HSI',
+    'SHANGHAI': '000001.SS', 'SSE': '000001.SS',
+    'ASX': '^AXJO', 'AUSTRALIA': '^AXJO',
+    'SENSEX': '^BSESN', 'INDIA': '^BSESN',
+    'NIFTY': '^NSEI',
+    'BOVESPA': '^BVSP', 'BRAZIL': '^BVSP',
+    'TSX': '^GSPTSE', 'CANADA': '^GSPTSE',
+    'KOSPI': '^KS11', 'KOREA': '^KS11',
+    'TAIEX': '^TWII', 'TAIWAN': '^TWII',
+
+    # ── International ETFs (easier than index tickers) ────────────────────────
+    'CHINA': 'FXI',
+    'EUROPE': 'VGK',
+    'EM': 'EEM', 'EMERGING': 'EEM',
+    'INTL': 'EFA', 'INTERNATIONAL': 'EFA',
+
+    # ── Forex ─────────────────────────────────────────────────────────────────
+    'EURUSD': 'EURUSD=X', 'EUR': 'EURUSD=X',
+    'GBPUSD': 'GBPUSD=X', 'GBP': 'GBPUSD=X', 'POUND': 'GBPUSD=X',
+    'USDJPY': 'USDJPY=X', 'JPY': 'USDJPY=X', 'YEN': 'USDJPY=X',
+    'USDCAD': 'USDCAD=X', 'CAD': 'USDCAD=X',
+    'AUDUSD': 'AUDUSD=X', 'AUD': 'AUDUSD=X',
+    'USDCHF': 'USDCHF=X', 'CHF': 'USDCHF=X',
+    'USDCNY': 'USDCNY=X', 'CNY': 'USDCNY=X',
+}
+
+# Asset type classification — used to pick the right stress-test years
+ASSET_TYPES = {
+    'commodity_energy':    {'CL=F','BZ=F','NG=F','RB=F','HO=F'},
+    'commodity_metal':     {'GC=F','SI=F','HG=F','PL=F','PA=F','ALI=F','SLX'},
+    'commodity_agri':      {'ZC=F','ZW=F','ZS=F','ZL=F','KC=F','SB=F','CT=F','CC=F','LBS=F'},
+    'crypto':              {'BTC-USD','ETH-USD','SOL-USD','BNB-USD','XRP-USD'},
+    'forex':               {'DX-Y.NYB','EURUSD=X','GBPUSD=X','USDJPY=X','USDCAD=X','AUDUSD=X','USDCHF=X','USDCNY=X'},
+    'intl_developed':      {'^FTSE','^GDAXI','^FCHI','^N225','^AXJO','^GSPTSE','^TWII','^KS11','EFA','VGK','EWJ','EWG','EWU','EWA'},
+    'intl_emerging':       {'^HSI','000001.SS','^BSESN','^NSEI','^BVSP','^KS11','EEM','FXI','EWZ','INDA'},
+}
+
+# Stress-test year ranges by asset type
+# 2022 is a bad stress test for commodities — energy/metals surged that year
+STRESS_TEST_YEARS = {
+    'commodity_energy':  [
+        ('2023  (oil/energy selloff)',      '2023-01-01', '2023-12-31'),
+        ('2020  (COVID crash)',             '2020-01-01', '2020-12-31'),
+        ('2018  (energy bear)',             '2018-01-01', '2018-12-31'),
+        ('Last 12 months',                 None, None),
+    ],
+    'commodity_metal':   [
+        ('2022  (mixed — metals volatile)', '2022-01-01', '2022-12-31'),
+        ('2023  (metals selloff)',          '2023-01-01', '2023-12-31'),
+        ('2018  (metals bear)',             '2018-01-01', '2018-12-31'),
+        ('Last 12 months',                 None, None),
+    ],
+    'commodity_agri':    [
+        ('2023  (agri retreat)',            '2023-01-01', '2023-12-31'),
+        ('2019  (agri bear)',               '2019-01-01', '2019-12-31'),
+        ('Last 12 months',                 None, None),
+    ],
+    'crypto':            [
+        ('2022  (crypto winter, -65%)',     '2022-01-01', '2022-12-31'),
+        ('2018  (crypto crash, -80%)',      '2018-01-01', '2018-12-31'),
+        ('2023  (recovery)',                '2023-01-01', '2023-12-31'),
+        ('Last 12 months',                 None, None),
+    ],
+    'forex':             [
+        ('2022  (dollar surge)',            '2022-01-01', '2022-12-31'),
+        ('2020  (COVID volatility)',        '2020-01-01', '2020-12-31'),
+        ('Last 12 months',                 None, None),
+    ],
+    'intl_developed':    [
+        ('2022  (global selloff)',          '2022-01-01', '2022-12-31'),
+        ('2018  (intl bear)',               '2018-01-01', '2018-12-31'),
+        ('2023  (recovery)',                '2023-01-01', '2023-12-31'),
+        ('Last 12 months',                 None, None),
+    ],
+    'intl_emerging':     [
+        ('2022  (EM bear)',                 '2022-01-01', '2022-12-31'),
+        ('2018  (EM crisis)',               '2018-01-01', '2018-12-31'),
+        ('2023',                            '2023-01-01', '2023-12-31'),
+        ('Last 12 months',                 None, None),
+    ],
+    'default':           [
+        ('2022  (bear year — S&P -18%)',    '2022-01-01', '2022-12-31'),
+        ('2023  (recovery)',                '2023-01-01', '2023-12-31'),
+        ('2024',                            '2024-01-01', '2024-12-31'),
+        ('Last 12 months',                 None, None),
+    ],
+}
+
+def classify_asset(ticker):
+    """Return the asset category for a given yfinance ticker"""
+    for asset_type, tickers in ASSET_TYPES.items():
+        if ticker in tickers:
+            return asset_type
+    if ticker.endswith('=F'):
+        return 'commodity_metal'
+    if ticker.endswith('-USD'):
+        return 'crypto'
+    if ticker.endswith('=X'):
+        return 'forex'
+    if ticker.startswith('^'):
+        return 'intl_developed'
+    return 'default'
+
 def format_symbol(symbol):
-    """Format symbol for Yahoo Finance"""
+    """Resolve common shorthand names to Yahoo Finance tickers"""
     symbol = symbol.upper().strip()
-    
-    symbol_mapping = {
-        'BTC': 'BTC-USD',
-        'ETH': 'ETH-USD',
-        'DXY': 'DX-Y.NYB',
-        'VIX': '^VIX',
-        'TNX': '^TNX',
-        'GOLD': 'GC=F',
-        'OIL': 'CL=F'
-    }
-    
-    return symbol_mapping.get(symbol, symbol)
+    return SYMBOL_MAP.get(symbol, symbol)
 
 def get_price_data(symbol, start_date, end_date):
     """Fetch price data with robust error handling"""
@@ -467,23 +601,34 @@ def main():
         st.header("Create Experiment")
 
         # Quick presets
-        st.write("**📚 Popular Patterns**")
+        st.write("**📚 US Equity Patterns**")
         col1, col2 = st.columns(2)
         with col1:
-            if st.button("GLD → GDX", use_container_width=True):
-                load_preset('gld-gdx')
-            if st.button("VIX → SPY", use_container_width=True):
-                load_preset('vix-spy')
-            if st.button("BTC → NASDAQ", use_container_width=True):
-                load_preset('btc-nasdaq')
-
+            if st.button("GLD → GDX", use_container_width=True):    load_preset('gld-gdx')
+            if st.button("VIX → SPY", use_container_width=True):    load_preset('vix-spy')
+            if st.button("BTC → QQQ", use_container_width=True):    load_preset('btc-nasdaq')
         with col2:
-            if st.button("DXY → Gold", use_container_width=True):
-                load_preset('dxy-gold')
-            if st.button("IWM → SPY", use_container_width=True):
-                load_preset('iwm-spy')
-            if st.button("Oil → Energy", use_container_width=True):
-                load_preset('oil-energy')
+            if st.button("DXY → Gold", use_container_width=True):   load_preset('dxy-gold')
+            if st.button("IWM → SPY", use_container_width=True):    load_preset('iwm-spy')
+            if st.button("Oil → XLE", use_container_width=True):    load_preset('oil-energy')
+
+        st.write("**⛏️ Commodities**")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("Gold → Silver", use_container_width=True):   load_preset('gold-silver')
+            if st.button("Oil → Copper", use_container_width=True):    load_preset('oil-copper')
+        with col2:
+            if st.button("Copper → SLX", use_container_width=True):    load_preset('copper-steel')
+            if st.button("Wheat → Corn", use_container_width=True):    load_preset('wheat-corn')
+
+        st.write("**🌍 International**")
+        col1, col2 = st.columns(2)
+        with col1:
+            if st.button("SPY → Nikkei", use_container_width=True):    load_preset('spy-nikkei')
+            if st.button("DXY → EEM", use_container_width=True):       load_preset('dxy-eem')
+        with col2:
+            if st.button("SPY → DAX", use_container_width=True):       load_preset('spy-dax')
+            if st.button("BTC → FXI", use_container_width=True):       load_preset('btc-china')
 
         st.divider()
 
@@ -491,7 +636,7 @@ def main():
         trigger_symbol = st.text_input(
             "Trigger Symbol",
             value=st.session_state.get('trigger_symbol', ''),
-            help="📡 The asset that creates the signal (e.g., GLD, VIX, BTC)"
+            help="Type any ticker — or use shorthand: GOLD, COPPER, WHEAT, NIKKEI, DAX, BTC, OIL, etc."
         )
 
         target_symbol = st.text_input(
@@ -642,26 +787,79 @@ def main():
             10. **EEM → SPY** - Emerging markets show global risk
             """)
 
-        # Help section
         with st.expander("💡 How This Works"):
             st.write("""
             1. **🔍 Finds Trigger Signals**: Scans for when your trigger symbol meets the condition
             2. **📈 Measures Forward Returns**: For each signal, calculates target symbol returns
             3. **📊 Statistical Analysis**: Shows win rates, average returns, and risk metrics
-            4. **🤖 AI Insights**: Provides trading strategy recommendations
-            
+            4. **🔍 Auto Reality Check**: If results look suspicious, re-runs on stress-test years automatically
+            5. **🤖 AI Insights**: Provides trading strategy recommendations
+
             **Example**: If GLD spikes 2% on Monday, what does GDX return by Friday (7d), next month (30d), etc.
+            """)
+
+        with st.expander("📖 Ticker Reference — What can I type?"):
+            st.markdown("""
+**You can type shorthand names** — the app converts them automatically.
+
+| What you type | What it means |
+|---|---|
+| **US Equities** | Just use the ticker: `SPY`, `QQQ`, `AAPL`, `GLD`, `GDX`, `XLE`, `IWM` |
+| `GOLD` or `XAU` | Gold futures (GC=F) |
+| `SILVER` or `XAG` | Silver futures (SI=F) |
+| `COPPER` or `CU` | Copper futures (HG=F) |
+| `STEEL` | Steel ETF (SLX) — no direct futures available |
+| `OIL`, `CRUDE`, `WTI` | Crude oil futures (CL=F) |
+| `BRENT` | Brent crude (BZ=F) |
+| `GAS`, `NATGAS` | Natural gas (NG=F) |
+| `WHEAT` | Wheat futures (ZW=F) |
+| `CORN` | Corn futures (ZC=F) |
+| `SOYBEANS`, `SOY` | Soybean futures (ZS=F) |
+| `COFFEE` | Coffee futures (KC=F) |
+| **Indices** | |
+| `VIX` or `FEAR` | Volatility index (^VIX) |
+| `DXY` or `DOLLAR` | US Dollar index |
+| `NIKKEI` or `JAPAN` | Nikkei 225 (^N225) |
+| `DAX` or `GERMANY` | German DAX (^GDAXI) |
+| `FTSE` or `UK` | UK FTSE 100 (^FTSE) |
+| `HANGSENG` or `HK` | Hang Seng (^HSI) |
+| `SENSEX` or `INDIA` | BSE Sensex (^BSESN) |
+| `BOVESPA` or `BRAZIL` | Brazilian index (^BVSP) |
+| **International ETFs** | |
+| `CHINA` | China ETF (FXI) |
+| `EMERGING` or `EM` | Emerging markets (EEM) |
+| `EUROPE` | European stocks (VGK) |
+| **Crypto** | |
+| `BTC` or `BITCOIN` | Bitcoin (BTC-USD) |
+| `ETH` or `ETHEREUM` | Ethereum (ETH-USD) |
+| **Forex** | |
+| `EUR`, `EURUSD` | Euro/Dollar (EURUSD=X) |
+| `GBP`, `POUND` | British pound (GBPUSD=X) |
+| `JPY`, `YEN` | Japanese yen (USDJPY=X) |
+
+**For international individual stocks**, use Yahoo Finance format: `HSBA.L` (HSBC London), `7203.T` (Toyota Tokyo), `ASML.AS` (ASML Amsterdam).
             """)
 
 def load_preset(preset_name):
     """Load preset experiment configurations"""
     presets = {
-        'gld-gdx': {'trigger': 'GLD', 'target': 'GDX'},
-        'vix-spy': {'trigger': '^VIX', 'target': 'SPY'},
-        'btc-nasdaq': {'trigger': 'BTC-USD', 'target': 'QQQ'},
-        'dxy-gold': {'trigger': 'DX-Y.NYB', 'target': 'GLD'},
-        'iwm-spy': {'trigger': 'IWM', 'target': 'SPY'},
-        'oil-energy': {'trigger': 'USO', 'target': 'XLE'}
+        # US Equity
+        'gld-gdx':      {'trigger': 'GLD',      'target': 'GDX'},
+        'vix-spy':      {'trigger': '^VIX',     'target': 'SPY'},
+        'btc-nasdaq':   {'trigger': 'BTC-USD',  'target': 'QQQ'},
+        'dxy-gold':     {'trigger': 'DX-Y.NYB', 'target': 'GLD'},
+        'iwm-spy':      {'trigger': 'IWM',      'target': 'SPY'},
+        'oil-energy':   {'trigger': 'USO',      'target': 'XLE'},
+        # Commodities
+        'gold-silver':  {'trigger': 'GC=F',     'target': 'SI=F'},
+        'oil-copper':   {'trigger': 'CL=F',     'target': 'HG=F'},
+        'copper-steel': {'trigger': 'HG=F',     'target': 'SLX'},
+        'wheat-corn':   {'trigger': 'ZW=F',     'target': 'ZC=F'},
+        # International
+        'spy-nikkei':   {'trigger': 'SPY',      'target': '^N225'},
+        'dxy-eem':      {'trigger': 'DX-Y.NYB', 'target': 'EEM'},
+        'spy-dax':      {'trigger': 'SPY',      'target': '^GDAXI'},
+        'btc-china':    {'trigger': 'BTC-USD',  'target': 'FXI'},
     }
 
     if preset_name in presets:
@@ -732,6 +930,106 @@ def run_all_experiments():
             result = st.session_state.scout.run_experiment(experiment)
             display_experiment_result(result, experiment)
             st.divider()
+
+def run_reality_check(experiment, best_period_key, scout):
+    """
+    Automatically split the full date range into rolling 1-year windows,
+    run the signal on each, and surface best/worst/recent results.
+    No hardcoded years — adapts to any asset or date range.
+    """
+    today = datetime.now()
+
+    # Go back up to 6 years from today (or the user's configured start, whichever is further)
+    history_start = min(
+        pd.to_datetime(experiment['start_date']),
+        today - timedelta(days=6 * 365)
+    )
+    history_end = today
+
+    # Build non-overlapping 1-year windows
+    windows = []
+    window_start = history_start
+    while window_start + timedelta(days=365) <= history_end:
+        window_end = window_start + timedelta(days=365)
+        windows.append((window_start, window_end))
+        window_start += timedelta(days=365)
+
+    if not windows:
+        return [], 'default'
+
+    # Run the experiment silently on each window
+    window_results = []
+    for ws, we in windows:
+        test_exp = {**experiment,
+                    'start_date': ws.strftime('%Y-%m-%d'),
+                    'end_date':   we.strftime('%Y-%m-%d')}
+        r = scout.run_experiment(test_exp, silent=True)
+
+        fa = (r or {}).get('forward_analysis', {})
+        if not r or r.get('error') or r.get('signals', 0) == 0 \
+                or best_period_key not in fa \
+                or fa[best_period_key]['valid_signals'] == 0:
+            window_results.append({
+                'window_start': ws, 'window_end': we,
+                'wr': None, 'avg': None, 'signals': 0
+            })
+            continue
+
+        s = fa[best_period_key]
+        window_results.append({
+            'window_start': ws, 'window_end': we,
+            'wr': s['win_rate'], 'avg': s['avg_return'],
+            'signals': s['valid_signals']
+        })
+
+    # Pick the most informative windows to show:
+    # best year, worst year, most recent year, + any with data
+    valid = [w for w in window_results if w['wr'] is not None]
+    if not valid:
+        return [], 'default'
+
+    best_w   = max(valid, key=lambda w: w['wr'])
+    worst_w  = min(valid, key=lambda w: w['wr'])
+    recent_w = max(valid, key=lambda w: w['window_start'])
+
+    # Build final display set (deduplicated by window_start)
+    seen = set()
+    display_windows = []
+    for w in [recent_w, best_w, worst_w] + sorted(valid, key=lambda x: x['window_start']):
+        key = w['window_start'].year
+        if key not in seen:
+            seen.add(key)
+            display_windows.append(w)
+
+    # Sort chronologically
+    display_windows.sort(key=lambda w: w['window_start'])
+
+    rows = []
+    for w in display_windows:
+        label_parts = [f"{w['window_start'].strftime('%b %Y')} – {w['window_end'].strftime('%b %Y')}"]
+        if w is best_w:   label_parts.append('📈 best year')
+        if w is worst_w:  label_parts.append('📉 worst year')
+        if w is recent_w: label_parts.append('🕐 most recent')
+        label = '  '.join(label_parts)
+
+        if w['wr'] is None:
+            rows.append({'Period': label, 'Signals': '—', 'Win rate': '—',
+                         'Avg gain/loss': '—', 'Holds up?': '⚪ No signals', '_wr': None})
+        else:
+            wr, avg = w['wr'], w['avg']
+            verdict = '✅ Yes' if (wr >= 60 and avg >= 1.0) else ('⚡ Marginal' if wr >= 50 else '❌ No')
+            rows.append({
+                'Period': label,
+                'Signals': w['signals'],
+                'Win rate': f"{wr:.0f}%",
+                'Avg gain/loss': f"{avg:+.1f}%",
+                'Holds up?': verdict,
+                '_wr': wr,
+            })
+
+    asset_type = classify_asset(format_symbol(experiment['target_symbol']))
+    return rows, asset_type
+
 
 def _signal_verdict(stats, n_signals):
     """Return (label, rec, emoji) based on stats quality"""
@@ -942,6 +1240,74 @@ The worst single loss was **{best['worst_signal']:.1f}%** — that alone could w
 
 **Try instead:** Lower the trigger threshold, test a longer lookback, or flip the direction (e.g. test what happens when {trigger} *falls* instead of rises).
         """)
+
+    # ── Auto reality check ───────────────────────────────────────────────────
+    period_num   = int(best_period.replace('d', ''))
+    is_suspicious = best['win_rate'] > 75 or annual_return > 150
+
+    if is_suspicious:
+        st.divider()
+        st.subheader("🔍 Automatic Reality Check")
+        st.caption(
+            f"A win rate of **{best['win_rate']:.0f}%** (or an estimated yearly return of "
+            f"**{annual_return:.0f}%**) is high enough that it could be a bull-market artifact. "
+            f"Re-running the same signal on specific market periods to see if the edge holds up..."
+        )
+        with st.spinner("Validating across historically relevant stress periods..."):
+            rc_rows, asset_type = run_reality_check(experiment, best_period, st.session_state.scout)
+
+        display_rows = [{k: v for k, v in r.items() if not k.startswith('_')} for r in rc_rows]
+        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+
+        # Asset-specific caveats
+        asset_notes = {
+            'commodity_energy':  "Note: 2022 was a *good* year for energy (oil surged on Ukraine war), so that's not used as a stress test here — 2023's selloff and 2020's COVID crash are more relevant.",
+            'commodity_metal':   "Note: Commodity metals had mixed 2022 performance (gold flat, copper volatile). The stress tests here reflect periods of actual demand weakness.",
+            'commodity_agri':    "Note: Agricultural commodities spiked in 2022 (Ukraine/Russia supply shock), so 2023's retreat and 2019's bear are used instead.",
+            'crypto':            "Note: Crypto has its own distinct cycles — 2018 (-80%) and 2022 (-65%) are the two real stress tests. Bull markets in between don't validate the signal.",
+            'forex':             "Note: Forex pairs don't have 'bear markets' the same way stocks do — stress tests here reflect high-volatility regimes instead.",
+            'intl_developed':    "Note: International developed markets largely track US cycles but with currency effects. A signal on Japanese or European stocks also has yen/euro exposure baked in.",
+            'intl_emerging':     "Note: Emerging markets have their own political/currency risks. A high win rate here may depend heavily on which country and what the dollar was doing.",
+        }
+        if asset_type in asset_notes:
+            st.caption(asset_notes[asset_type])
+
+        valid = [r for r in rc_rows if r['_wr'] is not None]
+        if valid:
+            holds    = sum(1 for r in valid if r['_wr'] >= 60)
+            marginal = sum(1 for r in valid if 50 <= r['_wr'] < 60)
+            breaks   = sum(1 for r in valid if r['_wr'] < 50)
+
+            # Check specifically if 2022 (bear) broke down
+            bear_row = next((r for r in valid if '2022' in r['Period']), None)
+            bear_broke = bear_row and bear_row['_wr'] < 50
+
+            if breaks > holds:
+                st.error(
+                    f"**The signal broke down in {breaks} of {len(valid)} periods tested.** "
+                    f"The strong original result was likely inflated by being tested during a favourable market. "
+                    f"Downgrade this to a weak signal and do not trade it with real money until it holds up across bear periods."
+                )
+            elif bear_broke:
+                st.warning(
+                    f"**The signal failed in the 2022 bear market** (win rate: {bear_row['Win rate']}). "
+                    f"It works when markets are rising, but not when they fall — which is when you need it most. "
+                    f"Only trade this when the broader market trend is up."
+                )
+            elif holds == len(valid):
+                st.success(
+                    f"**The signal held up across all {len(valid)} periods tested**, including the 2022 bear market. "
+                    f"This is a strong sign the edge is real and not just a bull-market fluke. "
+                    f"Confidence in the original verdict increases."
+                )
+            else:
+                st.warning(
+                    f"**Mixed results** — held up in {holds} period(s), broke down or was marginal in {breaks + marginal}. "
+                    f"The signal works in some conditions but not others. "
+                    f"Only trade it when market conditions are similar to the periods where it performed."
+                )
+        else:
+            st.info("Not enough historical data across the test periods to draw a conclusion.")
 
     st.divider()
 
