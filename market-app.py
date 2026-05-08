@@ -348,54 +348,6 @@ ASSET_TYPES = {
 
 # Stress-test year ranges by asset type
 # 2022 is a bad stress test for commodities — energy/metals surged that year
-STRESS_TEST_YEARS = {
-    'commodity_energy':  [
-        ('2023  (oil/energy selloff)',      '2023-01-01', '2023-12-31'),
-        ('2020  (COVID crash)',             '2020-01-01', '2020-12-31'),
-        ('2018  (energy bear)',             '2018-01-01', '2018-12-31'),
-        ('Last 12 months',                 None, None),
-    ],
-    'commodity_metal':   [
-        ('2022  (mixed — metals volatile)', '2022-01-01', '2022-12-31'),
-        ('2023  (metals selloff)',          '2023-01-01', '2023-12-31'),
-        ('2018  (metals bear)',             '2018-01-01', '2018-12-31'),
-        ('Last 12 months',                 None, None),
-    ],
-    'commodity_agri':    [
-        ('2023  (agri retreat)',            '2023-01-01', '2023-12-31'),
-        ('2019  (agri bear)',               '2019-01-01', '2019-12-31'),
-        ('Last 12 months',                 None, None),
-    ],
-    'crypto':            [
-        ('2022  (crypto winter, -65%)',     '2022-01-01', '2022-12-31'),
-        ('2018  (crypto crash, -80%)',      '2018-01-01', '2018-12-31'),
-        ('2023  (recovery)',                '2023-01-01', '2023-12-31'),
-        ('Last 12 months',                 None, None),
-    ],
-    'forex':             [
-        ('2022  (dollar surge)',            '2022-01-01', '2022-12-31'),
-        ('2020  (COVID volatility)',        '2020-01-01', '2020-12-31'),
-        ('Last 12 months',                 None, None),
-    ],
-    'intl_developed':    [
-        ('2022  (global selloff)',          '2022-01-01', '2022-12-31'),
-        ('2018  (intl bear)',               '2018-01-01', '2018-12-31'),
-        ('2023  (recovery)',                '2023-01-01', '2023-12-31'),
-        ('Last 12 months',                 None, None),
-    ],
-    'intl_emerging':     [
-        ('2022  (EM bear)',                 '2022-01-01', '2022-12-31'),
-        ('2018  (EM crisis)',               '2018-01-01', '2018-12-31'),
-        ('2023',                            '2023-01-01', '2023-12-31'),
-        ('Last 12 months',                 None, None),
-    ],
-    'default':           [
-        ('2022  (bear year — S&P -18%)',    '2022-01-01', '2022-12-31'),
-        ('2023  (recovery)',                '2023-01-01', '2023-12-31'),
-        ('2024',                            '2024-01-01', '2024-12-31'),
-        ('Last 12 months',                 None, None),
-    ],
-}
 
 def classify_asset(ticker):
     """Return the asset category for a given yfinance ticker"""
@@ -566,7 +518,7 @@ Then provide detailed analysis in these sections:
 Be specific with numbers and actionable advice. Compare to realistic market benchmarks."""
 
         message = client.messages.create(
-            model="claude-sonnet-4-20250514",
+            model="claude-sonnet-4-6",
             max_tokens=1200,
             temperature=0.7,
             messages=[{"role": "user", "content": prompt}]
@@ -933,102 +885,99 @@ def run_all_experiments():
 
 def run_reality_check(experiment, best_period_key, scout):
     """
-    Automatically split the full date range into rolling 1-year windows,
-    run the signal on each, and surface best/worst/recent results.
-    No hardcoded years — adapts to any asset or date range.
+    Walk backwards from today one year at a time.
+    Stop when the signal fails OR we've gone back 6 years.
+    Returns rows (most-recent-first) and a plain-English conclusion.
     """
     today = datetime.now()
+    MAX_YEARS = 6
+    PASS_THRESHOLD = 55   # win rate below this = signal breaks down
 
-    # Go back up to 6 years from today (or the user's configured start, whichever is further)
-    history_start = min(
-        pd.to_datetime(experiment['start_date']),
-        today - timedelta(days=6 * 365)
-    )
-    history_end = today
+    rows = []
+    conclusion = None
+    years_checked = 0
+    first_failure_label = None
 
-    # Build non-overlapping 1-year windows
-    windows = []
-    window_start = history_start
-    while window_start + timedelta(days=365) <= history_end:
-        window_end = window_start + timedelta(days=365)
-        windows.append((window_start, window_end))
-        window_start += timedelta(days=365)
+    for offset in range(1, MAX_YEARS + 1):
+        window_end   = today - timedelta(days=365 * (offset - 1))
+        window_start = today - timedelta(days=365 * offset)
 
-    if not windows:
-        return [], 'default'
+        if window_start.year < 2010:
+            break
 
-    # Run the experiment silently on each window
-    window_results = []
-    for ws, we in windows:
+        label = f"{window_start.strftime('%b %Y')} – {window_end.strftime('%b %Y')}"
+        if offset == 1:
+            label += '  🕐 most recent'
+
         test_exp = {**experiment,
-                    'start_date': ws.strftime('%Y-%m-%d'),
-                    'end_date':   we.strftime('%Y-%m-%d')}
+                    'start_date': window_start.strftime('%Y-%m-%d'),
+                    'end_date':   window_end.strftime('%Y-%m-%d')}
         r = scout.run_experiment(test_exp, silent=True)
 
         fa = (r or {}).get('forward_analysis', {})
-        if not r or r.get('error') or r.get('signals', 0) == 0 \
-                or best_period_key not in fa \
-                or fa[best_period_key]['valid_signals'] == 0:
-            window_results.append({
-                'window_start': ws, 'window_end': we,
-                'wr': None, 'avg': None, 'signals': 0
-            })
+        no_data = (not r or r.get('error') or r.get('signals', 0) == 0
+                   or best_period_key not in fa
+                   or fa[best_period_key]['valid_signals'] == 0)
+
+        if no_data:
+            rows.append({'Period': label, 'Signals': '—', 'Win rate': '—',
+                         'Avg gain/loss': '—', 'Holds up?': '⚪ No data', '_wr': None})
+            years_checked += 1
             continue
 
-        s = fa[best_period_key]
-        window_results.append({
-            'window_start': ws, 'window_end': we,
-            'wr': s['win_rate'], 'avg': s['avg_return'],
-            'signals': s['valid_signals']
+        s   = fa[best_period_key]
+        wr  = s['win_rate']
+        avg = s['avg_return']
+        years_checked += 1
+
+        passes = wr >= PASS_THRESHOLD and avg >= 0.5
+        verdict = '✅ Holds up' if passes else ('⚡ Marginal' if wr >= 45 else '❌ Breaks down')
+
+        rows.append({
+            'Period': label,
+            'Signals': s['valid_signals'],
+            'Win rate': f"{wr:.0f}%",
+            'Avg gain/loss': f"{avg:+.1f}%",
+            'Holds up?': verdict,
+            '_wr': wr,
         })
 
-    # Pick the most informative windows to show:
-    # best year, worst year, most recent year, + any with data
-    valid = [w for w in window_results if w['wr'] is not None]
-    if not valid:
-        return [], 'default'
+        if not passes and first_failure_label is None:
+            first_failure_label = label.split('  ')[0]  # strip emoji tag
 
-    best_w   = max(valid, key=lambda w: w['wr'])
-    worst_w  = min(valid, key=lambda w: w['wr'])
-    recent_w = max(valid, key=lambda w: w['window_start'])
+        # Keep going even after a failure — show the full picture
 
-    # Build final display set (deduplicated by window_start)
-    seen = set()
-    display_windows = []
-    for w in [recent_w, best_w, worst_w] + sorted(valid, key=lambda x: x['window_start']):
-        key = w['window_start'].year
-        if key not in seen:
-            seen.add(key)
-            display_windows.append(w)
+    # Build conclusion
+    valid_rows  = [r for r in rows if r['_wr'] is not None]
+    passes_all  = all(r['_wr'] >= PASS_THRESHOLD for r in valid_rows)
+    passes_none = all(r['_wr'] < PASS_THRESHOLD for r in valid_rows) if valid_rows else False
+    n_fail      = sum(1 for r in valid_rows if r['_wr'] < PASS_THRESHOLD)
+    n_pass      = sum(1 for r in valid_rows if r['_wr'] >= PASS_THRESHOLD)
 
-    # Sort chronologically
-    display_windows.sort(key=lambda w: w['window_start'])
-
-    rows = []
-    for w in display_windows:
-        label_parts = [f"{w['window_start'].strftime('%b %Y')} – {w['window_end'].strftime('%b %Y')}"]
-        if w is best_w:   label_parts.append('📈 best year')
-        if w is worst_w:  label_parts.append('📉 worst year')
-        if w is recent_w: label_parts.append('🕐 most recent')
-        label = '  '.join(label_parts)
-
-        if w['wr'] is None:
-            rows.append({'Period': label, 'Signals': '—', 'Win rate': '—',
-                         'Avg gain/loss': '—', 'Holds up?': '⚪ No signals', '_wr': None})
-        else:
-            wr, avg = w['wr'], w['avg']
-            verdict = '✅ Yes' if (wr >= 60 and avg >= 1.0) else ('⚡ Marginal' if wr >= 50 else '❌ No')
-            rows.append({
-                'Period': label,
-                'Signals': w['signals'],
-                'Win rate': f"{wr:.0f}%",
-                'Avg gain/loss': f"{avg:+.1f}%",
-                'Holds up?': verdict,
-                '_wr': wr,
-            })
+    if not valid_rows:
+        conclusion = ('info', "Not enough historical data to validate across multiple periods.")
+    elif passes_all:
+        conclusion = ('success',
+            f"Signal held up across all {years_checked} years checked going back to "
+            f"{rows[-1]['Period'].split('–')[0].strip()}. "
+            f"No failure found — the edge appears robust across different market conditions.")
+    elif passes_none:
+        conclusion = ('error',
+            f"Signal broke down in every year tested. The original result is likely "
+            f"a fluke specific to your selected date range. Do not trade this.")
+    elif n_fail == 1:
+        conclusion = ('warning',
+            f"Signal held up in {n_pass} of {years_checked} years but broke down in "
+            f"{first_failure_label}. One bad year isn't disqualifying, but check what "
+            f"was happening in the market during that period before trading.")
+    else:
+        conclusion = ('error',
+            f"Signal failed in {n_fail} of {years_checked} years tested. "
+            f"It only works in specific market conditions — not reliable enough to trade "
+            f"with real money unless you can identify when those conditions exist.")
 
     asset_type = classify_asset(format_symbol(experiment['target_symbol']))
-    return rows, asset_type
+    return rows, conclusion, asset_type
 
 
 def _signal_verdict(stats, n_signals):
@@ -1242,72 +1191,50 @@ The worst single loss was **{best['worst_signal']:.1f}%** — that alone could w
         """)
 
     # ── Auto reality check ───────────────────────────────────────────────────
-    period_num   = int(best_period.replace('d', ''))
-    is_suspicious = best['win_rate'] > 75 or annual_return > 150
+    period_num    = int(best_period.replace('d', ''))
+    is_suspicious = best['win_rate'] > 62 or annual_return > 80
 
     if is_suspicious:
         st.divider()
         st.subheader("🔍 Automatic Reality Check")
+        reason = []
+        if best['win_rate'] > 62:
+            reason.append(f"win rate of {best['win_rate']:.0f}%")
+        if annual_return > 80:
+            reason.append(f"estimated yearly return of {annual_return:.0f}%")
         st.caption(
-            f"A win rate of **{best['win_rate']:.0f}%** (or an estimated yearly return of "
-            f"**{annual_return:.0f}%**) is high enough that it could be a bull-market artifact. "
-            f"Re-running the same signal on specific market periods to see if the edge holds up..."
+            f"A {' and '.join(reason)} is strong enough that it could partly be a market-condition artifact. "
+            f"Splitting the full date range into 1-year windows to see if the edge holds up consistently..."
         )
-        with st.spinner("Validating across historically relevant stress periods..."):
-            rc_rows, asset_type = run_reality_check(experiment, best_period, st.session_state.scout)
+        with st.spinner("Walking back year by year to find where the signal holds or breaks..."):
+            rc_rows, rc_conclusion, asset_type = run_reality_check(
+                experiment, best_period, st.session_state.scout
+            )
 
-        display_rows = [{k: v for k, v in r.items() if not k.startswith('_')} for r in rc_rows]
-        st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
+        if rc_rows:
+            display_rows = [{k: v for k, v in r.items() if not k.startswith('_')} for r in rc_rows]
+            st.dataframe(pd.DataFrame(display_rows), use_container_width=True, hide_index=True)
 
-        # Asset-specific caveats
+        # Plain-English conclusion from the loop
+        if rc_conclusion:
+            level, msg = rc_conclusion
+            if level == 'success': st.success(f"**{msg}**")
+            elif level == 'warning': st.warning(f"**{msg}**")
+            elif level == 'error': st.error(f"**{msg}**")
+            else: st.info(msg)
+
+        # Asset-specific context note
         asset_notes = {
-            'commodity_energy':  "Note: 2022 was a *good* year for energy (oil surged on Ukraine war), so that's not used as a stress test here — 2023's selloff and 2020's COVID crash are more relevant.",
-            'commodity_metal':   "Note: Commodity metals had mixed 2022 performance (gold flat, copper volatile). The stress tests here reflect periods of actual demand weakness.",
-            'commodity_agri':    "Note: Agricultural commodities spiked in 2022 (Ukraine/Russia supply shock), so 2023's retreat and 2019's bear are used instead.",
-            'crypto':            "Note: Crypto has its own distinct cycles — 2018 (-80%) and 2022 (-65%) are the two real stress tests. Bull markets in between don't validate the signal.",
-            'forex':             "Note: Forex pairs don't have 'bear markets' the same way stocks do — stress tests here reflect high-volatility regimes instead.",
-            'intl_developed':    "Note: International developed markets largely track US cycles but with currency effects. A signal on Japanese or European stocks also has yen/euro exposure baked in.",
-            'intl_emerging':     "Note: Emerging markets have their own political/currency risks. A high win rate here may depend heavily on which country and what the dollar was doing.",
+            'commodity_energy':  "Note: Energy markets have their own cycles — an 'up 2%' signal in oil may mean something very different in 2022 (supply shock) vs 2023 (demand slowdown).",
+            'commodity_metal':   "Note: Industrial metals track economic growth cycles, not stock market cycles. Stress tests here reflect actual demand slowdowns.",
+            'commodity_agri':    "Note: Agricultural prices are heavily influenced by weather and supply shocks, which don't repeat on a calendar schedule.",
+            'crypto':            "Note: Crypto has extreme boom/bust cycles. A signal that worked in 2021 may have looked very different in the 2022 crash.",
+            'forex':             "Note: Forex signals are driven by interest rate differentials and macro policy — very different conditions year to year.",
+            'intl_developed':    "Note: International stocks have currency exposure on top of price exposure. A win in Japan might partly be a yen move.",
+            'intl_emerging':     "Note: Emerging markets carry political and currency risk on top of normal market risk.",
         }
         if asset_type in asset_notes:
             st.caption(asset_notes[asset_type])
-
-        valid = [r for r in rc_rows if r['_wr'] is not None]
-        if valid:
-            holds    = sum(1 for r in valid if r['_wr'] >= 60)
-            marginal = sum(1 for r in valid if 50 <= r['_wr'] < 60)
-            breaks   = sum(1 for r in valid if r['_wr'] < 50)
-
-            # Check specifically if 2022 (bear) broke down
-            bear_row = next((r for r in valid if '2022' in r['Period']), None)
-            bear_broke = bear_row and bear_row['_wr'] < 50
-
-            if breaks > holds:
-                st.error(
-                    f"**The signal broke down in {breaks} of {len(valid)} periods tested.** "
-                    f"The strong original result was likely inflated by being tested during a favourable market. "
-                    f"Downgrade this to a weak signal and do not trade it with real money until it holds up across bear periods."
-                )
-            elif bear_broke:
-                st.warning(
-                    f"**The signal failed in the 2022 bear market** (win rate: {bear_row['Win rate']}). "
-                    f"It works when markets are rising, but not when they fall — which is when you need it most. "
-                    f"Only trade this when the broader market trend is up."
-                )
-            elif holds == len(valid):
-                st.success(
-                    f"**The signal held up across all {len(valid)} periods tested**, including the 2022 bear market. "
-                    f"This is a strong sign the edge is real and not just a bull-market fluke. "
-                    f"Confidence in the original verdict increases."
-                )
-            else:
-                st.warning(
-                    f"**Mixed results** — held up in {holds} period(s), broke down or was marginal in {breaks + marginal}. "
-                    f"The signal works in some conditions but not others. "
-                    f"Only trade it when market conditions are similar to the periods where it performed."
-                )
-        else:
-            st.info("Not enough historical data across the test periods to draw a conclusion.")
 
     st.divider()
 
